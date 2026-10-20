@@ -17,6 +17,7 @@ import warp as wp
 from curobo._src.cost.cost_cspace_cfg import CSpaceCostCfg
 from curobo._src.cost.cost_cspace_dist_cfg import CSpaceDistCostCfg
 from curobo._src.cost.cost_cspace_type import CSpaceCostType
+from curobo._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
 from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
 from curobo._src.rollout.cost_manager.cost_manager_robot import RobotCostManager
 from curobo._src.rollout.cost_manager.cost_manager_robot_cfg import RobotCostManagerCfg
@@ -52,6 +53,23 @@ def franka_transition_model(cuda_device_cfg, franka_robot_cfg_dict, transition_i
     transition_dict["horizon"] = 10
     transition_dict["batch_size"] = 4
 
+    transition_cfg = RobotStateTransitionCfg.create(
+        transition_dict, franka_robot_cfg_dict, cuda_device_cfg
+    )
+    return RobotStateTransition(transition_cfg)
+
+
+@pytest.fixture
+def franka_transition_model_with_interpolation(cuda_device_cfg, franka_robot_cfg_dict):
+    """Transition model with interpolation_steps > 1 to exercise per-step weight scaling."""
+    from curobo._src.transition.robot_state_transition import RobotStateTransition
+    from curobo._src.transition.robot_state_transition_cfg import RobotStateTransitionCfg
+    from curobo._src.util_file import get_task_configs_path, join_path, load_yaml
+
+    task_file = join_path(get_task_configs_path(), "trajopt/transition_bspline_trajopt.yml")
+    transition_dict = load_yaml(task_file).get("transition_model_cfg", {})
+    transition_dict["n_knots"] = 8
+    transition_dict["batch_size"] = 4
     transition_cfg = RobotStateTransitionCfg.create(
         transition_dict, franka_robot_cfg_dict, cuda_device_cfg
     )
@@ -199,6 +217,28 @@ class TestRobotCostManagerInitializeFromConfig:
         assert manager.has_cost("start_cspace_dist")
         assert manager.has_cost("target_cspace_dist")
         assert manager.has_cost("cspace")
+
+    def test_self_collision_weight_is_not_compounded_across_managers(
+        self, cuda_device_cfg, franka_transition_model_with_interpolation
+    ):
+        """Per-interpolation-step weight scaling must not mutate the shared config."""
+        transition_model = franka_transition_model_with_interpolation
+        steps = transition_model.interpolation_steps
+        assert steps > 1
+
+        config = RobotCostManagerCfg(
+            self_collision_cfg=SelfCollisionCostCfg(weight=1000.0, device_cfg=cuda_device_cfg)
+        )
+        managers = [RobotCostManager(device_cfg=cuda_device_cfg) for _ in range(3)]
+        for manager in managers:
+            manager.initialize_from_config(config, transition_model)
+
+        assert float(config.self_collision_cfg.weight) == pytest.approx(1000.0)
+        for manager in managers:
+            assert manager.has_cost("self_collision")
+            assert float(manager.get_cost("self_collision")._weight) == pytest.approx(
+                1000.0 / steps
+            )
 
 
 class TestRobotCostManagerComputeCosts:

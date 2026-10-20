@@ -9,6 +9,7 @@ methods to enable/disable individual cost terms at runtime for goal switching.
 from __future__ import annotations
 
 # Standard Library
+from copy import copy
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -148,12 +149,16 @@ class RobotCostManager:
         # Self-collision
         self_collision_kin_config = robot_model.get_self_collision_config()
         if config.self_collision_cfg is not None and self_collision_kin_config is not None:
-            config.self_collision_cfg.self_collision_kin_config = self_collision_kin_config
+            # Scale a copy of the config: the same manager config is shared by every
+            # rollout instance created from it, so scaling in place would divide the
+            # weight once per instance (and per cost/constraint manager).
+            self_collision_cfg = copy(config.self_collision_cfg)
+            self_collision_cfg.self_collision_kin_config = self_collision_kin_config
             if transition_model.interpolation_steps > 1:
-                config.self_collision_cfg.weight = (
-                    config.self_collision_cfg.weight / transition_model.interpolation_steps
+                self_collision_cfg.weight = (
+                    self_collision_cfg.weight / transition_model.interpolation_steps
                 )
-            self_collision_cost = SelfCollisionCost(config.self_collision_cfg)
+            self_collision_cost = SelfCollisionCost(self_collision_cfg)
             if robot_model.total_spheres == 0:
                 self_collision_cost.disable_cost()
             self.register_cost("self_collision", self_collision_cost)
