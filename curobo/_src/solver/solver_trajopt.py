@@ -332,6 +332,8 @@ class TrajOptSolver:
 
         best_trajopt_result: Optional[TrajOptSolverResult] = None
         best_dt = seed_goal_state.dt.clone()
+        seed_dt = best_dt.clone()
+        seed_action = action_seed.clone()
         goal_buffer = None
 
         for i in range(finetune_attempts + 1):
@@ -458,6 +460,21 @@ class TrajOptSolver:
             if i == 0 and torch.count_nonzero(best_trajopt_result.success) == 0:
                 break
 
+        if (
+            seed_traj is not None
+            and goal_buffer is not None
+            and torch.count_nonzero(best_trajopt_result.success) == 0
+        ):
+            # Trajectory optimization starts from the user supplied seed but is not
+            # guaranteed to improve on it: the seed can be feasible while the
+            # optimized iterate is not. In that case, evaluate the seed itself
+            # before reporting failure, so a valid seed trajectory (for example, a
+            # collision-free graph path with feasible timing) is not discarded.
+            self._update_trajectory_dt(seed_dt, goal_buffer)
+            seed_result = self._evaluate_action_result(seed_action, num_seeds)
+            if torch.count_nonzero(seed_result.success) > 0:
+                best_trajopt_result = seed_result
+
         best_trajopt_result.process_metrics_and_rank_seeds()
         best_trajopt_result = self._get_best_result(best_trajopt_result, return_seeds)
         best_trajopt_result.solve_time = opt_time
@@ -505,6 +522,45 @@ class TrajOptSolver:
         )
         last_tstep = last_tstep.view(batch_size, num_seeds)
         return interpolated_metrics, interpolated_trajectory, last_tstep
+
+    @profiler.record_function("trajopt_solver/_evaluate_action_result")
+    def _evaluate_action_result(
+        self, action: torch.Tensor, num_seeds: int
+    ) -> TrajOptSolverResult:
+        """Build a solver result for ``action`` without optimizing it.
+
+        Rolls the action out with the metrics transition model, interpolates it to
+        ``interpolation_dt``, and ranks the resulting trajectories. This is used to
+        evaluate a supplied seed trajectory as a candidate solution.
+
+        Args:
+            action: Action sequence of shape ``(batch * num_seeds, action_horizon,
+                action_dim)``.
+            num_seeds: Number of seeds per problem.
+
+        Returns:
+            Ranked :class:`TrajOptSolverResult` for the action sequence.
+        """
+        with torch.no_grad():
+            metrics = self.metrics_rollout.compute_metrics_from_action(action)
+        js_optimized = metrics.state.joint_state
+        js_optimized.joint_names = self.joint_names
+        js_optimized.knot = action
+        js_optimized.knot_dt = (
+            js_optimized.dt * self.auxiliary_rollout.transition_model.interpolation_steps
+        )
+        interpolated_metrics, interpolated_trajectory, last_tstep = (
+            self._interpolate_and_compute_metrics(js_optimized)
+        )
+        return self._get_result(
+            action,
+            metrics,
+            interpolated_metrics,
+            interpolated_trajectory,
+            last_tstep,
+            num_seeds,
+            num_seeds,
+        )
 
     @profiler.record_function("trajopt_solver/_get_result")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)

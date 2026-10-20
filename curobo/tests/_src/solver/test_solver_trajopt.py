@@ -747,3 +747,38 @@ class TestTrajOptSolverSolveCspace:
         )
 
         assert isinstance(result, TrajOptSolverResult)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+    def test_solve_cspace_returns_feasible_seed_when_optimizer_fails(
+        self, trajopt_solver, sample_start_state, monkeypatch
+    ):
+        """A feasible seed trajectory is returned when optimization cannot improve it."""
+        goal_state = sample_start_state.clone()
+        goal_state.position[..., 0] += 0.1
+        base_result = trajopt_solver.solve_cspace(
+            current_state=sample_start_state,
+            goal_state=goal_state,
+            return_seeds=1,
+            finetune_attempts=0,
+        )
+        if not torch.any(base_result.success):
+            pytest.skip("baseline solve did not find a feasible trajectory")
+        seed_traj = base_result.solution.clone()
+
+        def failing_optimize(seed_action):
+            # Move every waypoint far away so the optimized iterate is infeasible
+            # while the supplied seed remains a valid solution.
+            return seed_action + 100.0
+
+        monkeypatch.setattr(trajopt_solver.optimizer, "optimize", failing_optimize)
+
+        result = trajopt_solver.solve_cspace(
+            current_state=sample_start_state,
+            goal_state=goal_state,
+            seed_traj=seed_traj,
+            return_seeds=1,
+            finetune_attempts=0,
+        )
+
+        assert torch.any(result.success)
+        assert torch.allclose(result.solution[:, 0], seed_traj[:, 0], atol=1e-4)
