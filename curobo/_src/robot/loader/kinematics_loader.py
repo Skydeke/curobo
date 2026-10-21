@@ -86,6 +86,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
         self._joint_limits = None
         self._self_collision_data = None
         self.lock_jointstate = None
+        self._unpinned_lock_joint_data = {}
         self.lin_jac, self.ang_jac = None, None
 
         self._link_spheres_tensor = torch.zeros(
@@ -115,6 +116,20 @@ class KinematicsLoader(KinematicsLoaderCfg):
             extra_links=self.extra_links,
             load_meshes=self.load_meshes,
         )
+
+        # A `None` lock value marks an *unpinned* lock: the joint stays locked
+        # (out of the planning cspace) but its value is supplied with each query.
+        # It gets a pinned slot at the 0.0 fallback so the model is complete
+        # before the first state arrives; Kinematics.update_lock_joints rewrites
+        # it in place and Kinematics.get_full_js overlays the live value.
+        self.unpinned_lock_joints = [
+            name for name, value in (self.lock_joints or {}).items() if value is None
+        ]
+        if self.unpinned_lock_joints:
+            self.lock_joints = {
+                name: (0.0 if value is None else value)
+                for name, value in self.lock_joints.items()
+            }
 
         if self.lock_joints is None:
             self._build_kinematics(self.base_link, other_links, self.tool_frames)
@@ -163,6 +178,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             cspace=self.cspace,
             base_link=self.base_link,
             lock_jointstate=self.lock_jointstate,
+            unpinned_lock_joints=self.unpinned_lock_joints,
             mimic_joints=self._mimic_joint_data,
             link_masses_com=self._link_masses_com,
             link_inertias=self._link_inertias,
@@ -170,6 +186,29 @@ class KinematicsLoader(KinematicsLoaderCfg):
             grasp_contact_link_names=self.grasp_contact_link_names,
         )
         self._kinematics_config.make_contiguous()
+        if self.unpinned_lock_joints:
+            recorded = [
+                self._unpinned_lock_joint_data[name]
+                for name in self.unpinned_lock_joints
+                if name in self._unpinned_lock_joint_data
+            ]
+            if recorded:
+                self._kinematics_config.unpinned_lock_joint_link_indices = torch.as_tensor(
+                    [r["link_index"] for r in recorded],
+                    dtype=torch.int16,
+                    device=self.device_cfg.device,
+                )
+                self._kinematics_config.unpinned_lock_joint_types = torch.as_tensor(
+                    [r["joint_type"] for r in recorded],
+                    dtype=torch.int16,
+                    device=self.device_cfg.device,
+                )
+                self._kinematics_config.unpinned_lock_joint_offsets = torch.stack(
+                    [r["offset"] for r in recorded]
+                )
+                self._kinematics_config.unpinned_lock_joint_origins = torch.stack(
+                    [r["origin"] for r in recorded]
+                )
         if self.asset_root_path is not None and self.asset_root_path != "":
             self._kinematics_parser.add_absolute_path_to_link_meshes(self.asset_root_path)
 
@@ -786,6 +825,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             # convert tensors to cpu:
             self._joint_map_type = self._joint_map_type.to(device=self.cpu_tensor_args.device)
             self._joint_map = self._joint_map.to(device=self.cpu_tensor_args.device)
+            unpinned_names = set(self.unpinned_lock_joints)
 
             for j in lock_joint_names:
                 if "parent" in joint_data[j]:
@@ -798,6 +838,16 @@ class KinematicsLoader(KinematicsLoaderCfg):
                     )
                     # Make this joint as fixed
                     i = joint_data[j]["link_index"]
+                    if j in unpinned_names:
+                        # Remember the unbaked transform: the value can then be
+                        # rewritten in place (Kinematics.update_lock_joints)
+                        # without rebuilding the model.
+                        self._unpinned_lock_joint_data[j] = {
+                            "link_index": i,
+                            "origin": self._fixed_transform[i].clone(),
+                            "joint_type": int(self._joint_map_type[i].item()),
+                            "offset": self._joint_offset_map[2 * i : 2 * i + 2].clone(),
+                        }
                     self._fixed_transform[i] = parent_t_child.get_affine_matrix()
                     self._joint_map_type[i] = -1
                     self._joint_map[i] = -1

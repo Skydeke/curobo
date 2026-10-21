@@ -118,8 +118,11 @@ class KinematicsLoaderCfg:
 
 
     #: Lock active joints in the kinematic tree. This will convert the joint to a fixed joint with
-    #: joint angle given from this dictionary.
-    lock_joints: Optional[Dict[str, float]] = None
+    #: joint angle given from this dictionary. A ``None`` value marks an *unpinned* lock: the joint
+    #: still stays out of the planning cspace (it is never planned), but its value is read from the
+    #: joint state supplied with each query (:meth:`Kinematics.update_lock_joints`) instead of
+    #: being pinned. An unpinned lock defaults to 0.0 before the first state arrives.
+    lock_joints: Optional[Dict[str, Optional[float]]] = None
 
     #: Additional links to add to parsed kinematics tree. This is useful for adding fixed links
     #: that are not present in the URDF or USD.

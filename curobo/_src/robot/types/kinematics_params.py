@@ -96,6 +96,35 @@ class KinematicsParams:
     #: Name of joints to lock to a fixed value along with the locked value
     lock_jointstate: Optional[JointState] = None
 
+    #: Names of *unpinned* lock joints: held out of the planning cspace (never
+    #: planned) but whose value is read from the incoming joint state at query time
+    #: instead of being pinned. Unlike the rest of ``lock_jointstate``, these are
+    #: not fixed: :meth:`Kinematics.update_lock_joints` rewrites their baked
+    #: transform in place and :meth:`Kinematics.get_full_js` overlays the value
+    #: supplied with the state. They still get a ``lock_jointstate`` slot at the 0.0
+    #: fallback (see :class:`~curobo._src.robot.loader.kinematics_loader.KinematicsLoader`)
+    #: so the model is complete before the first state arrives.
+    unpinned_lock_joints: Optional[List[str]] = None
+
+    #: Link index [n_unpinned] of each unpinned lock joint, used to rewrite its
+    #: baked transform.
+    unpinned_lock_joint_link_indices: Optional[torch.Tensor] = None
+
+    #: Joint type (:class:`~curobo._src.robot.types.joint_types.JointType` value)
+    #: [n_unpinned] of each unpinned lock joint; selects the axis of its local transform.
+    unpinned_lock_joint_types: Optional[torch.Tensor] = None
+
+    #: ``[multiplier, offset]`` [n_unpinned, 2] of each unpinned lock joint (same
+    #: convention as :attr:`joint_offset_map`); the effective joint value is
+    #: ``multiplier * q + offset``.
+    unpinned_lock_joint_offsets: Optional[torch.Tensor] = None
+
+    #: The *unbaked* fixed transform of each unpinned lock joint's link
+    #: [n_unpinned, 3, 4]. The model is built with
+    #: ``origin · J(type, multiplier·q + offset)`` baked into ``fixed_transforms``,
+    #: so a new value only needs this origin, not a rebuild.
+    unpinned_lock_joint_origins: Optional[torch.Tensor] = None
+
     #: Joints that mimic other joints. This will be populated by :class:~`KinematicsLoader`
     #  when parsing the kinematics of the robot.
     mimic_joints: Optional[dict] = None
@@ -309,6 +338,29 @@ class KinematicsParams:
             lock_jointstate=(
                 self.lock_jointstate.clone() if self.lock_jointstate is not None else None
             ),
+            unpinned_lock_joints=(
+                self.unpinned_lock_joints.copy() if self.unpinned_lock_joints is not None else None
+            ),
+            unpinned_lock_joint_link_indices=(
+                self.unpinned_lock_joint_link_indices.clone()
+                if self.unpinned_lock_joint_link_indices is not None
+                else None
+            ),
+            unpinned_lock_joint_types=(
+                self.unpinned_lock_joint_types.clone()
+                if self.unpinned_lock_joint_types is not None
+                else None
+            ),
+            unpinned_lock_joint_offsets=(
+                self.unpinned_lock_joint_offsets.clone()
+                if self.unpinned_lock_joint_offsets is not None
+                else None
+            ),
+            unpinned_lock_joint_origins=(
+                self.unpinned_lock_joint_origins.clone()
+                if self.unpinned_lock_joint_origins is not None
+                else None
+            ),
             mimic_joints=self.mimic_joints.copy() if self.mimic_joints is not None else None,
             link_spheres=self.link_spheres.clone() if self.link_spheres is not None else None,
             link_sphere_idx_map=(
@@ -438,6 +490,21 @@ class KinematicsParams:
         self.total_spheres = new_config.total_spheres
         if self.lock_jointstate is not None and new_config.lock_jointstate is not None:
             self.lock_jointstate.copy_(new_config.lock_jointstate)
+        self.unpinned_lock_joints = new_config.unpinned_lock_joints
+        for _name in (
+            "unpinned_lock_joint_link_indices",
+            "unpinned_lock_joint_types",
+            "unpinned_lock_joint_offsets",
+            "unpinned_lock_joint_origins",
+        ):
+            _src = getattr(new_config, _name)
+            if _src is None:
+                continue
+            _dst = getattr(self, _name)
+            if _dst is None:
+                setattr(self, _name, _src.clone())
+            else:
+                _dst.copy_(_src)
         self.mimic_joints = new_config.mimic_joints
         if new_config.link_masses_com is not None and self.link_masses_com is not None:
             self.link_masses_com.copy_(new_config.link_masses_com)
