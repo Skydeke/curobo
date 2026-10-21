@@ -390,7 +390,10 @@ def reindex_joint_state_inplace(joint_state: "JointState", joint_names: List[str
 
 @profiler.record_function("state_joint_ops/augment_joint_state")
 def augment_joint_state(
-    joint_state: "JointState", joint_names: List[str], lock_joints: Optional["JointState"] = None
+    joint_state: "JointState",
+    joint_names: List[str],
+    lock_joints: Optional["JointState"] = None,
+    unpinned_lock_joints: Optional[List[str]] = None,
 ) -> "JointState":
     """Augment joint state with locked joints.
 
@@ -398,6 +401,9 @@ def augment_joint_state(
         joint_state: Joint state to augment.
         joint_names: Full list of joint names.
         lock_joints: Joint state for locked joints.
+        unpinned_lock_joints: Names of lock joints whose value is read from
+            ``joint_state`` instead of ``lock_joints``. Unlike the other locked
+            joints, these are allowed to appear in ``joint_state``.
 
     Returns:
         Augmented joint state.
@@ -408,14 +414,47 @@ def augment_joint_state(
         raise ValueError("joint_names can't be None")
 
     # if some joints are locked, we assume that these joints are not in joint_state.joint_names:
-    if any(item in joint_state.joint_names for item in lock_joints.joint_names):
+    # ...except the unpinned lock joints, which are locked only to reserve a value slot.
+    unpinned_names = set(unpinned_lock_joints or [])
+    if any(
+        item in joint_state.joint_names
+        for item in lock_joints.joint_names
+        if item not in unpinned_names
+    ):
         raise ValueError("lock_joints is also listed in js.joint_names")
+
+    if unpinned_names:
+        # An unpinned lock supplied with the state is already present, so append only
+        # the locks it does not cover (the rest keep their pinned/fallback value).
+        supplied_names = [
+            name
+            for name in lock_joints.joint_names
+            if name in unpinned_names and name in joint_state.joint_names
+        ]
+        if supplied_names:
+            remaining = [
+                name for name in lock_joints.joint_names if name not in supplied_names
+            ]
+            lock_joints = _select_joints(lock_joints, remaining) if remaining else None
 
     # append the lock_joints to existing joint state:
     new_js = joint_state.clone()
-    new_js = append_joints_to_state(new_js, lock_joints)
+    if lock_joints is not None:
+        new_js = append_joints_to_state(new_js, lock_joints)
     new_js = reorder_joint_state(new_js, joint_names)
     return new_js
+
+
+def _select_joints(joint_state: "JointState", names: List[str]) -> "JointState":
+    """A copy of ``joint_state`` restricted to ``names``, in that order."""
+    from .state_joint import JointState
+
+    indices = [joint_state.joint_names.index(name) for name in names]
+    return JointState(
+        position=joint_state.position[..., indices],
+        joint_names=list(names),
+        device_cfg=joint_state.device_cfg,
+    )
 
 
 def append_joints_to_state(joint_state: "JointState", other_js: "JointState") -> "JointState":

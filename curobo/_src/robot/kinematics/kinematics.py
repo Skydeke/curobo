@@ -11,7 +11,9 @@ of the forward kinematics function.
 from __future__ import annotations
 
 # Standard Library
-from typing import List, Optional, Union
+import math
+
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.autograd.profiler as profiler
@@ -24,6 +26,7 @@ from curobo._src.geom.types import Mesh, Sphere
 from curobo._src.robot.kinematics.kinematics_cfg import KinematicsCfg
 from curobo._src.robot.kinematics.kinematics_state import KinematicsState
 from curobo._src.robot.types.joint_limits import JointLimits
+from curobo._src.robot.types.joint_types import JointType
 from curobo._src.robot.types.kinematics_params import KinematicsParams
 
 # CuRobo
@@ -33,6 +36,41 @@ from curobo._src.state.state_joint_ops import augment_joint_state
 from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import ToolPose
 from curobo._src.util.logging import log_and_raise
+
+
+def _affine_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Compose two [3, 4] affine transforms as ``a @ b`` (returns [3, 4])."""
+    a4 = torch.cat([a, torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=a.device, dtype=a.dtype)])
+    b4 = torch.cat([b, torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=b.device, dtype=b.dtype)])
+    return (a4 @ b4)[:3]
+
+
+def _joint_affine(joint_type: int, value: float, like: torch.Tensor) -> torch.Tensor:
+    """Local transform [3, 4] of a single-DOF joint at ``value`` (from JointType).
+
+    ``value`` is the already-scaled joint value (``multiplier * q + offset``); the
+    axis is always positive for the URDF-parsed types (a negative URDF axis is
+    carried in the offset multiplier, see the URDF parser).
+    """
+    kind = JointType(int(joint_type))
+    c = math.cos(value)
+    s = math.sin(value)
+    one, zero = 1.0, 0.0
+    if kind == JointType.X_ROT:
+        rows = [[one, zero, zero, zero], [zero, c, -s, zero], [zero, s, c, zero]]
+    elif kind == JointType.Y_ROT:
+        rows = [[c, zero, s, zero], [zero, one, zero, zero], [-s, zero, c, zero]]
+    elif kind == JointType.Z_ROT:
+        rows = [[c, -s, zero, zero], [s, c, zero, zero], [zero, zero, one, zero]]
+    elif kind == JointType.X_PRISM:
+        rows = [[one, zero, zero, value], [zero, one, zero, zero], [zero, zero, one, zero]]
+    elif kind == JointType.Y_PRISM:
+        rows = [[one, zero, zero, zero], [zero, one, zero, value], [zero, zero, one, zero]]
+    elif kind == JointType.Z_PRISM:
+        rows = [[one, zero, zero, zero], [zero, one, zero, zero], [zero, zero, one, value]]
+    else:
+        rows = [[one, zero, zero, zero], [zero, one, zero, zero], [zero, zero, one, zero]]
+    return torch.tensor(rows, device=like.device, dtype=like.dtype)
 
 
 class Kinematics:
@@ -389,6 +427,17 @@ class Kinematics:
         """State of joints that are locked in the kinematic representation."""
         return self.config.kinematics_config.lock_jointstate
 
+    @property
+    def unpinned_lock_joints(self) -> Optional[List[str]]:
+        """Names of lock joints whose value is read from the supplied state.
+
+        These joints are locked out of the planning cspace (never planned) but are
+        not pinned: the value passed with the joint state is used for FK and
+        collision checks (see :meth:`update_lock_joints`), and the configured value
+        is only a fallback used until a state is supplied.
+        """
+        return self.config.kinematics_config.unpinned_lock_joints
+
     def get_full_js(self, joint_state: JointState) -> JointState:
         """Get state of all joints, including locked joints.
 
@@ -404,7 +453,9 @@ class Kinematics:
         all_joint_names = self.all_articulated_joint_names
         lock_joint_state = self.lock_jointstate
 
-        new_js = augment_joint_state(joint_state, all_joint_names, lock_joint_state)
+        new_js = augment_joint_state(
+            joint_state, all_joint_names, lock_joint_state, self.unpinned_lock_joints
+        )
         return new_js
 
     def get_mimic_js(self, joint_state: JointState) -> JointState:
@@ -453,6 +504,42 @@ class Kinematics:
             new_kin_config: New kinematics representation of the robot.
         """
         self.config.kinematics_config.copy_(new_kin_config)
+
+    def update_lock_joints(self, values: Dict[str, float]) -> None:
+        """Set new values for the model's unpinned lock joints without a rebuild.
+
+        An unpinned lock joint (``lock_joints: {joint: null}``) is held out of the
+        planning cspace but is *not* pinned: the model is built with
+        ``origin · J(type, multiplier·q + offset)`` baked into ``fixed_transforms``
+        (see
+        :attr:`~curobo._src.robot.types.kinematics_params.KinematicsParams.unpinned_lock_joint_origins`).
+        This rewrites those entries in place, so FK and collision checking track
+        the new value with no re-parse and no planner/IK rebuild.
+
+        Only the joint's own baked link is rewritten. An unpinned lock joint is
+        expected to be independent (e.g. a camera gimbal); a mimic joint driven by
+        one is refreshed through the joint-state path instead.
+
+        Args:
+            values: ``{joint_name: value}`` for a subset of the unpinned lock
+                joints. Joints that are not present keep their current value.
+        """
+        cfg = self.config.kinematics_config
+        if not cfg.unpinned_lock_joints or cfg.unpinned_lock_joint_origins is None:
+            return
+        for index, name in enumerate(cfg.unpinned_lock_joints):
+            if name not in values:
+                continue
+            multiplier = float(cfg.unpinned_lock_joint_offsets[index, 0])
+            offset = float(cfg.unpinned_lock_joint_offsets[index, 1])
+            scaled = multiplier * float(values[name]) + offset
+            link_index = int(cfg.unpinned_lock_joint_link_indices[index])
+            joint = _joint_affine(
+                int(cfg.unpinned_lock_joint_types[index]), scaled, cfg.fixed_transforms
+            )
+            cfg.fixed_transforms[link_index] = _affine_mul(
+                cfg.unpinned_lock_joint_origins[index], joint
+            )
 
     def get_active_js(self, full_js: JointState):
         """Get joint state of active joints of the robot.
