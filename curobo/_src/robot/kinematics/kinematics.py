@@ -505,6 +505,48 @@ class Kinematics:
         """
         self.config.kinematics_config.copy_(new_kin_config)
 
+    def _unpinned_lock_metadata(self):
+        """Per-joint constants for :meth:`update_lock_joints`, read once.
+
+        ``update_lock_joints`` runs from the perception lane on every joint-state
+        change, and every ``float(tensor[i])`` on a device tensor is a full device
+        synchronisation (measured 30-106 ms per call on a contended GPU). The
+        multiplier/offset, link index, joint type and bake-time origin are all
+        constants for a given KinematicsConfig, so they are materialised here once
+        (on the host) and reused. Returns ``None`` when the model has no unpinned
+        lock joints.
+        """
+        import torch
+
+        cfg = self.config.kinematics_config
+        cache = getattr(self, "_unpinned_lock_meta", None)
+        if cache is not None and cache[0] is cfg:
+            return cache[1]
+        if not cfg.unpinned_lock_joints or cfg.unpinned_lock_joint_origins is None:
+            self._unpinned_lock_meta = (cfg, None)
+            return None
+
+        def to_list(value):
+            if torch.is_tensor(value):
+                return value.detach().to("cpu").tolist()
+            return list(value)
+
+        offsets = cfg.unpinned_lock_joint_offsets
+        origins = cfg.unpinned_lock_joint_origins
+        offsets = offsets.detach().to("cpu") if torch.is_tensor(offsets) else offsets
+        origins = origins.detach().to("cpu") if torch.is_tensor(origins) else origins
+        names = list(cfg.unpinned_lock_joints)
+        meta = (
+            names,
+            [float(o) for o in offsets[:, 0]],
+            [float(o) for o in offsets[:, 1]],
+            to_list(cfg.unpinned_lock_joint_link_indices),
+            to_list(cfg.unpinned_lock_joint_types),
+            [origins[i] for i in range(len(names))],
+        )
+        self._unpinned_lock_meta = (cfg, meta)
+        return meta
+
     def update_lock_joints(self, values: Dict[str, float]) -> None:
         """Set new values for the model's unpinned lock joints without a rebuild.
 
@@ -520,26 +562,39 @@ class Kinematics:
         expected to be independent (e.g. a camera gimbal); a mimic joint driven by
         one is refreshed through the joint-state path instead.
 
+        The compose is done on the host with cached constants and written back as
+        ONE device transfer, so the call has no device synchronisation and no
+        per-joint kernel: the previous form read four scalars per joint out of
+        device tensors (a sync each) and issued a separate device write per joint.
+
         Args:
             values: ``{joint_name: value}`` for a subset of the unpinned lock
                 joints. Joints that are not present keep their current value.
         """
-        cfg = self.config.kinematics_config
-        if not cfg.unpinned_lock_joints or cfg.unpinned_lock_joint_origins is None:
+        import torch
+
+        meta = self._unpinned_lock_metadata()
+        if meta is None:
             return
-        for index, name in enumerate(cfg.unpinned_lock_joints):
+        names, multiplier, offset, link_indices, types, origins = meta
+        rows = []
+        links = []
+        for index, name in enumerate(names):
             if name not in values:
                 continue
-            multiplier = float(cfg.unpinned_lock_joint_offsets[index, 0])
-            offset = float(cfg.unpinned_lock_joint_offsets[index, 1])
-            scaled = multiplier * float(values[name]) + offset
-            link_index = int(cfg.unpinned_lock_joint_link_indices[index])
-            joint = _joint_affine(
-                int(cfg.unpinned_lock_joint_types[index]), scaled, cfg.fixed_transforms
-            )
-            cfg.fixed_transforms[link_index] = _affine_mul(
-                cfg.unpinned_lock_joint_origins[index], joint
-            )
+            scaled = multiplier[index] * float(values[name]) + offset[index]
+            origin = origins[index]
+            joint = _joint_affine(types[index], scaled, origin)
+            rows.append(_affine_mul(origin, joint))
+            links.append(link_indices[index])
+        if not rows:
+            return
+        cfg = self.config.kinematics_config
+        stacked = torch.stack(rows)
+        index_t = torch.as_tensor(
+            [int(i) for i in links], dtype=torch.long,
+            device=cfg.fixed_transforms.device)
+        cfg.fixed_transforms.index_copy_(0, index_t, stacked.to(cfg.fixed_transforms.device))
 
     def get_active_js(self, full_js: JointState):
         """Get joint state of active joints of the robot.
