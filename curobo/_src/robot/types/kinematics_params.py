@@ -125,8 +125,11 @@ class KinematicsParams:
     #: so a new value only needs this origin, not a rebuild.
     unpinned_lock_joint_origins: Optional[torch.Tensor] = None
 
-    #: Joints that mimic other joints. This will be populated by :class:~`KinematicsLoader`
-    #  when parsing the kinematics of the robot.
+    #: Joints that mimic other joints, keyed by the active joint name. Each entry
+    #: carries the mimic's ``joint_name`` and ``joint_offset`` plus the
+    #: ``link_index``, ``joint_type`` and unbaked ``origin`` needed to rewrite its
+    #: baked transform when an unpinned lock joint moves
+    #: (:meth:`Kinematics.update_lock_joints`).
     mimic_joints: Optional[dict] = None
 
     #: Sphere representation of the robot's geometry. Shape is [n_configs, num_spheres, 4].

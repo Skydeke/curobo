@@ -449,7 +449,17 @@ class KinematicsLoader(KinematicsLoaderCfg):
                     if body.joint_name not in self._mimic_joint_data:
                         self._mimic_joint_data[body.joint_name] = []
                     self._mimic_joint_data[body.joint_name].append(
-                        {"joint_offset": body.joint_offset, "joint_name": body.mimic_joint_name}
+                        {
+                            "joint_offset": body.joint_offset,
+                            "joint_name": body.mimic_joint_name,
+                            # A mimic of an unpinned lock joint is baked into a
+                            # fixed transform when the model is built. These
+                            # fields let Kinematics.update_lock_joints rewrite
+                            # that transform when the active joint moves.
+                            "link_index": i,
+                            "joint_type": body.joint_type.value,
+                            "origin": self._fixed_transform[i][0].clone(),
+                        }
                     )
                 else:
                     self._active_joints.append(i)
