@@ -43,6 +43,12 @@ def robot_sphere_bounds_kernel(
     sphere's radius, so the mask kernel skips the per-sphere loop for it - the
     room, the floor and the far wall cost one comparison.
 
+    A negative radius marks a *disabled* sphere: cuRobo's collision check
+    ignores it, and the loader fills ``extra_collision_spheres`` links (e.g.
+    ``attached_object``) with ``radius=-100`` placeholders. Such a sphere is
+    not geometry, so it is skipped here; folding it in would drag the box
+    around by 100 m.
+
     Args:
         spheres: ``(S, 4)`` collision spheres ``(x, y, z, radius)``.
         bounds: ``(6,)`` float32 accumulator, seeded with +inf/-inf.
@@ -52,6 +58,8 @@ def robot_sphere_bounds_kernel(
         return
     sphere = spheres[tid]
     radius = sphere[3]
+    if radius < 0.0:
+        return
     wp.atomic_min(bounds, 0, sphere[0] - radius)
     wp.atomic_min(bounds, 1, sphere[1] - radius)
     wp.atomic_min(bounds, 2, sphere[2] - radius)
@@ -121,11 +129,18 @@ def robot_mask_depth_kernel(
 
     # A point is robot when |p - c| - r <= threshold, i.e. |p - c|^2 <= (r +
     # threshold)^2 - compared squared to keep the sqrt out of the inner loop.
+    # Spheres with a negative radius are *disabled* (cuRobo's collision test
+    # skips them and the loader uses -100 for placeholder links); they must be
+    # skipped before the square, or (r + threshold)^2 turns the sentinel into a
+    # ~100 m reach and masks every pixel inside the bounds box.
     n_spheres = spheres.shape[0]
     for s in range(n_spheres):
         sphere = spheres[s]
+        radius = sphere[3]
+        if radius < 0.0:
+            continue
         delta = point_base - wp.vec3(sphere[0], sphere[1], sphere[2])
-        reach = sphere[3] + threshold
+        reach = radius + threshold
         if wp.dot(delta, delta) <= reach * reach:
             depth_out[b, i, j] = 0.0
             return
@@ -161,7 +176,8 @@ def mask_depth_by_spheres(
     Args:
         depth: ``(H, W)`` float32 depth in metres (host array).
         spheres: ``(S, 4)`` collision spheres ``(x, y, z, radius)`` in the base
-            frame, on the same device the kernels run on.
+            frame, on the same device the kernels run on. Rows with a negative
+            radius are disabled spheres (cuRobo's sentinel) and are ignored.
         cam_pose: Camera -> base pose as ``[x, y, z, qw, qx, qy, qz]``.
         intrinsics: ``(fx, fy, cx, cy)`` in pixels.
         threshold: Distance (m) within which a point counts as robot.
