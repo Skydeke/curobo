@@ -558,9 +558,11 @@ class Kinematics:
         This rewrites those entries in place, so FK and collision checking track
         the new value with no re-parse and no planner/IK rebuild.
 
-        Only the joint's own baked link is rewritten. An unpinned lock joint is
-        expected to be independent (e.g. a camera gimbal); a mimic joint driven by
-        one is refreshed through the joint-state path instead.
+        Mimic joints driven by an unpinned lock joint are baked into fixed
+        transforms too, so they are rewritten alongside it (using the same
+        ``multiplier``/``offset`` the URDF declared). Without that, only the
+        active link would move and every mimicking link would stay at the pose
+        baked at build time — the classic "one Robotiq finger closes" bug.
 
         The compose is done on the host with cached constants and written back as
         ONE device transfer, so the call has no device synchronisation and no
@@ -577,19 +579,37 @@ class Kinematics:
         if meta is None:
             return
         names, multiplier, offset, link_indices, types, origins = meta
+        cfg = self.config.kinematics_config
+        mimic_joints = cfg.mimic_joints or {}
         rows = []
         links = []
         for index, name in enumerate(names):
             if name not in values:
                 continue
-            scaled = multiplier[index] * float(values[name]) + offset[index]
+            value = float(values[name])
+            scaled = multiplier[index] * value + offset[index]
             origin = origins[index]
             joint = _joint_affine(types[index], scaled, origin)
             rows.append(_affine_mul(origin, joint))
             links.append(link_indices[index])
+            for mimic in mimic_joints.get(name, ()):
+                if "link_index" not in mimic:
+                    continue
+                mimic_scaled = (
+                    mimic["joint_offset"][0] * value + mimic["joint_offset"][1]
+                )
+                mimic_origin = mimic["origin"]
+                rows.append(
+                    _affine_mul(
+                        mimic_origin,
+                        _joint_affine(
+                            mimic["joint_type"], mimic_scaled, mimic_origin
+                        ),
+                    )
+                )
+                links.append(mimic["link_index"])
         if not rows:
             return
-        cfg = self.config.kinematics_config
         stacked = torch.stack(rows)
         index_t = torch.as_tensor(
             [int(i) for i in links], dtype=torch.long,
