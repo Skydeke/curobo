@@ -262,6 +262,25 @@ class RobotCostManager:
                     )
                     cost_collection.add(cost_value, "cspace")
 
+        # Target cspace distance (e.g. hold a passive arm while the active one
+        # moves). Registered under cost_cfg with weight 0 by default; the
+        # convergence path already knew this cost, but the optimization path
+        # did not, so enabling it there had no effect on the solve.
+        if (
+            self.has_cost("target_cspace_dist")
+            and goal is not None
+            and goal.goal_js is not None
+        ):
+            target_cspace_cost = self.get_cost("target_cspace_dist")
+            if target_cspace_cost.enabled:
+                with self._stream_context("target_cspace_dist"):
+                    cost_value = target_cspace_cost.forward(
+                        state.joint_state.position,
+                        goal.goal_js.position,
+                        goal.idxs_goal_js.view(-1),
+                    ).unsqueeze(-1)
+                    cost_collection.add(cost_value, "target_cspace_dist")
+
         # Self-collision
         if self.has_cost("self_collision"):
             self_collision_cost = self.get_cost("self_collision")

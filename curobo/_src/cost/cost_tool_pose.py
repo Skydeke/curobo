@@ -42,6 +42,15 @@ class ToolPoseCost(BaseCost):
         # Store link names for which this cost applies
         self.tool_frames = config.tool_frames
         self.num_links = len(self.tool_frames)
+        #: Which links are actually goals. A link whose every axis is disabled
+        #: only exists so GoalToolPose has an entry for each configured frame;
+        #: its convergence distance must not gate success. Kept as a tensor and
+        #: refreshed in update_tool_pose_criteria() (never inside forward: the
+        #: forward path runs under CUDA-graph capture, where a host sync from
+        #: bool(tensor) invalidates the capture).
+        self._active_links = torch.zeros(
+            self.num_links, dtype=torch.bool, device=self.device_cfg.device)
+        self._active_links.copy_(self._compute_active_links())
 
         # Cache for warp kernels - one per link for efficiency
         self._warp_kernel: Optional[wp.kernel] = None
@@ -141,8 +150,25 @@ class ToolPoseCost(BaseCost):
                 warp_kernel,
             )
         )
+        # A tool frame with every axis disabled is NOT a goal. Its dummy pose
+        # (used only because GoalToolPose needs an entry for each configured
+        # frame) must not gate the solver's convergence check, which compares
+        # these distances against a global position/orientation tolerance for
+        # every link. Zero them so a passive arm carried by a moving lift still
+        # reports "converged"; the cost above is already zero for such a link.
+        # Multiply rather than branch: forward runs under CUDA-graph capture.
+        mask = self._active_links.to(linear_distance.dtype).view(1, 1, -1)
+        linear_distance = linear_distance * mask
+        angular_distance = angular_distance * mask
         return cost, linear_distance, angular_distance, goalset_idx
 
+
+    def _compute_active_links(self):
+        criteria = self._stacked_tool_pose_criteria
+        terminal = criteria.terminal_pose_axes_weight_factor
+        non_terminal = criteria.non_terminal_pose_axes_weight_factor
+        enabled = (terminal.abs().sum(dim=-1) + non_terminal.abs().sum(dim=-1)) > 0.0
+        return enabled.to(self.device_cfg.device)
 
     def update_tool_pose_criteria(
         self,
@@ -152,3 +178,6 @@ class ToolPoseCost(BaseCost):
         self._stacked_tool_pose_criteria.update_tool_pose_criteria(
             tool_pose_criteria=tool_pose_criteria,
         )
+        # In-place: CUDA graphs capture this tensor's address, so replacing it
+        # would leave the captured replay reading the old mask.
+        self._active_links.copy_(self._compute_active_links())

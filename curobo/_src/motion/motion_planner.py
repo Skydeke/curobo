@@ -212,6 +212,8 @@ class MotionPlanner:
         use_implicit_goal: bool = True,
         max_attempts: int = 5,
         enable_graph_attempt: int = 1,
+        goal_state: Optional[JointState] = None,
+        seed_hold_mask: Optional[torch.Tensor] = None,
     ) -> Optional[TrajOptSolverResult]:
         """Plan a trajectory to reach target tool poses.
 
@@ -222,13 +224,23 @@ class MotionPlanner:
         if current_state.ndim > 2:
             log_and_raise(f"current_state must be a 2D tensor, got shape: {current_state.shape}")
 
+        # A multi-tool-frame robot has a cspace target cost available for
+        # holding a passive arm. Always populate goal_js for it (weight stays
+        # zero unless a caller enables the cost): the goal-buffer structure is
+        # then identical on every pose plan, so CUDA-graph capture/replay does
+        # not change shape between a held and an unheld request.
+        if goal_state is None and len(self.tool_frames) > 1:
+            goal_state = current_state
+
         if goal_tool_poses.num_goalset > 1:
             return self._plan_pose_goalset(
                 goal_tool_poses, current_state, use_implicit_goal, max_attempts,
+                goal_state=goal_state, seed_hold_mask=seed_hold_mask,
             )
 
         return self._plan_pose_single(
             goal_tool_poses, current_state, max_attempts, enable_graph_attempt,
+            goal_state=goal_state, seed_hold_mask=seed_hold_mask,
         )
 
     def _plan_pose_single(
@@ -237,6 +249,8 @@ class MotionPlanner:
         current_state: JointState,
         max_attempts: int,
         enable_graph_attempt: int,
+        goal_state: Optional[JointState] = None,
+        seed_hold_mask: Optional[torch.Tensor] = None,
     ) -> Optional[TrajOptSolverResult]:
         """Single-goal planning with retry, seed repair, and graph seeding."""
         trajopt_result = None
@@ -263,6 +277,14 @@ class MotionPlanner:
             if success_count < num_seeds:
                 good_solution = seed_config[ik_result.success][0:1, :].clone()
                 seed_config[~ik_result.success] = good_solution
+            if seed_hold_mask is not None:
+                # Keep the held joints at the start value in the seed. The IK
+                # solver does not know about the hold, so without this the
+                # trajectory optimizer starts from a state where the passive
+                # arm is already displaced and may never pull it back.
+                seed_config = seed_config.clone()
+                seed_config[..., seed_hold_mask] = (
+                    current_state.position[:, seed_hold_mask].unsqueeze(1))
 
             seed_traj = None
             finetune_attempts = 1
@@ -274,6 +296,11 @@ class MotionPlanner:
                 if graph_seed is None:
                     continue
                 seed_traj = graph_seed
+                if seed_hold_mask is not None:
+                    seed_traj = seed_traj.clone()
+                    seed_traj[..., seed_hold_mask] = (
+                        current_state.position[:, seed_hold_mask]
+                        .view(1, 1, -1))
                 total_time += 0.0  # graph time already in graph_seed call
                 finetune_attempts = 3
                 finetune_dt_scale = 0.75
@@ -285,6 +312,7 @@ class MotionPlanner:
                 use_implicit_goal=True,
                 finetune_attempts=finetune_attempts,
                 finetune_dt_scale=finetune_dt_scale,
+                goal_state=goal_state,
             )
             total_time += trajopt_result.total_time
             solve_time += trajopt_result.solve_time
@@ -302,6 +330,8 @@ class MotionPlanner:
         current_state: JointState,
         use_implicit_goal: bool = True,
         max_attempts: int = 10,
+        goal_state: Optional[JointState] = None,
+        seed_hold_mask: Optional[torch.Tensor] = None,
     ) -> Optional[TrajOptSolverResult]:
         """Goalset planning: IK + TrajOpt, no graph seeding."""
         for _ in range(max_attempts):
@@ -313,10 +343,16 @@ class MotionPlanner:
             if torch.count_nonzero(ik_result.success) == 0:
                 return None
 
+            seed_config = ik_result.solution
+            if seed_hold_mask is not None:
+                seed_config = seed_config.clone()
+                seed_config[..., seed_hold_mask] = (
+                    current_state.position[:, seed_hold_mask].unsqueeze(1))
             trajopt_result = self.trajopt_solver.solve_pose(
                 goal_tool_poses, current_state,
-                seed_config=ik_result.solution,
+                seed_config=seed_config,
                 use_implicit_goal=use_implicit_goal,
+                goal_state=goal_state,
             )
             if torch.count_nonzero(trajopt_result.success) > 0:
                 break
