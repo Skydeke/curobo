@@ -2072,6 +2072,7 @@ def export_robot(args: argparse.Namespace) -> Path:
             "cylinder": args.max_cylinders,
             "mesh": args.max_meshes,
             "voxel": args.max_voxel_grids,
+            "voxels_per_grid": args.max_voxels_per_grid,
         }
         ik_optimizer_profile, ik_optimizer = build_ik_optimizer_config(params)
         ik_tensor_values = build_ik_tensors(
@@ -2454,6 +2455,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cylinders", type=int, default=32)
     parser.add_argument("--max-meshes", type=int, default=16)
     parser.add_argument("--max-voxel-grids", type=int, default=0)
+    parser.add_argument("--max-voxels-per-grid", type=int, default=0)
     args = parser.parse_args()
     if args.robot_config is None and args.urdf is None:
         parser.error("provide --robot-config or --urdf")
@@ -2485,9 +2487,12 @@ def parse_args() -> argparse.Namespace:
         "max_cylinders",
         "max_meshes",
         "max_voxel_grids",
+        "max_voxels_per_grid",
     ):
         if getattr(args, name) < 0:
             parser.error(f"--{name.replace('_', '-')} must be non-negative")
+    if args.max_voxels_per_grid > 0 and args.max_voxel_grids <= 0:
+        parser.error("--max-voxels-per-grid requires --max-voxel-grids > 0")
     return args
 
 

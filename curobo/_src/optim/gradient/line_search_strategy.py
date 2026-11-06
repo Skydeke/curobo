@@ -208,19 +208,19 @@ class LineSearchStrategy(ABC):
 
         x = x.detach()
         if search_actions is None:
-            probe_scales = line_search_scale.view(1, -1, 1, 1)
+            probe_scales = line_search_scale.contiguous().view(1, -1, 1, 1)
             if context.line_search_backtracking:
-                probe_scales = context.beta.view(-1, 1, 1, 1) * probe_scales
+                probe_scales = context.beta.contiguous().view(-1, 1, 1, 1) * probe_scales
             x_set = self.jit_get_x_set(step_direction, x, probe_scales)
         else:
             x_set = search_actions
 
-        x_set = x_set.view(
+        x_set = x_set.contiguous().view(
             x_set.shape[0],
             x_set.shape[1],
             context.action_horizon * context.action_dim,
         )
-        step_direction = step_direction.view(
+        step_direction = step_direction.contiguous().view(
             step_direction.shape[0], 1, context.action_horizon * context.action_dim
         )
         x_set = x_set.detach().requires_grad_(True)
@@ -311,13 +311,13 @@ class LineSearchStrategy(ABC):
         batch_size, n_linesearch, _ = x_set.shape
         batch_index = torch.arange(batch_size, device=x_set.device)
         action = x_set[batch_index, local_index]
-        selected_cost = cost.view(batch_size, n_linesearch)[batch_index, local_index]
+        selected_cost = cost.contiguous().view(batch_size, n_linesearch)[batch_index, local_index]
         selected_gradient = gradient[batch_index, local_index]
-        repeated_index = local_index.to(dtype=torch.int32).view(-1, 1).expand(-1, n_linesearch)
+        repeated_index = local_index.to(dtype=torch.int32).contiguous().view(-1, 1).expand(-1, n_linesearch)
         return LineSearchState(
-            action=action.view(batch_size, context.action_horizon, context.action_dim),
+            action=action.contiguous().view(batch_size, context.action_horizon, context.action_dim),
             cost=selected_cost,
-            gradient=selected_gradient.view(
+            gradient=selected_gradient.contiguous().view(
                 batch_size, context.action_horizon, context.action_dim
             ),
             idxs=repeated_index,
@@ -330,8 +330,8 @@ class LineSearchStrategy(ABC):
         choose_trial: torch.Tensor,
     ) -> LineSearchState:
         """Choose complete action, cost, and gradient tuples without mixing sources."""
-        action_mask = choose_trial.view(-1, 1, 1)
-        index_mask = choose_trial.view(-1, 1)
+        action_mask = choose_trial.contiguous().view(-1, 1, 1)
+        index_mask = choose_trial.contiguous().view(-1, 1)
         return LineSearchState(
             action=torch.where(action_mask, trial.action, baseline.action),
             cost=torch.where(choose_trial, trial.cost, baseline.cost),
@@ -489,11 +489,11 @@ class ArmijoLineSearchStrategy(LineSearchStrategy):
         g_x = g_x.detach()
 
         step_vec_T = step_direction.transpose(-1, -2)
-        g_step = iteration_state.exploration_gradient.view(b, 1, -1) @ step_vec_T
+        g_step = iteration_state.exploration_gradient.contiguous().view(b, 1, -1) @ step_vec_T
         armijo_scales = line_search_scale
         if context.line_search_backtracking:
-            armijo_scales = context.beta.view(-1, 1) * armijo_scales
-        armijo = c.squeeze(-1) <= iteration_state.exploration_cost.view(-1, 1) + (
+            armijo_scales = context.beta.contiguous().view(-1, 1) * armijo_scales
+        armijo = c.squeeze(-1) <= iteration_state.exploration_cost.contiguous().view(-1, 1) + (
             context.line_search_c_1 * armijo_scales * g_step.squeeze(-1)
         )
         if context.line_search_backtracking:
@@ -503,7 +503,7 @@ class ArmijoLineSearchStrategy(LineSearchStrategy):
                 & torch.isfinite(g_x).all(-1)
                 & torch.isfinite(g_step.squeeze(-1))
                 & (g_step.squeeze(-1) < 0.0)
-                & (c.squeeze(-1) < iteration_state.exploration_cost.view(-1, 1))
+                & (c.squeeze(-1) < iteration_state.exploration_cost.contiguous().view(-1, 1))
             )
         success_scale = torch.where(armijo, line_search_scale, torch.zeros_like(line_search_scale))
         _, local_index = torch.max(success_scale, dim=1)
@@ -716,13 +716,13 @@ class BaseWolfeLineSearchStrategy(LineSearchStrategy):
             b, n_line_search, _ = x_set.shape
             step_vec_T = step_vec.transpose(-1, -2)
             g_full_step = g_x @ step_vec_T
-            g_step = iteration_state.exploration_gradient.view(b, 1, context.opt_dim) @ step_vec_T
+            g_step = iteration_state.exploration_gradient.contiguous().view(b, 1, context.opt_dim) @ step_vec_T
 
             # Wolfe condition 1 (sufficient decrease)
             armijo_scales = line_search_scale
             if context.line_search_backtracking:
-                armijo_scales = context.beta.view(-1, 1) * armijo_scales
-            armijo_1 = c.squeeze(-1) <= iteration_state.exploration_cost.view(-1, 1) + (
+                armijo_scales = context.beta.contiguous().view(-1, 1) * armijo_scales
+            armijo_1 = c.squeeze(-1) <= iteration_state.exploration_cost.contiguous().view(-1, 1) + (
                 context.line_search_c_1 * armijo_scales * g_step.squeeze(-1)
             )
             if context.line_search_backtracking:
@@ -732,7 +732,7 @@ class BaseWolfeLineSearchStrategy(LineSearchStrategy):
                     & torch.isfinite(g_full_step.squeeze(-1))
                     & torch.isfinite(g_step.squeeze(-1))
                     & (g_step.squeeze(-1) < 0.0)
-                    & (c.squeeze(-1) < iteration_state.exploration_cost.view(-1, 1))
+                    & (c.squeeze(-1) < iteration_state.exploration_cost.contiguous().view(-1, 1))
                 )
 
             # Wolfe condition 2 (curvature) - implemented by subclasses
@@ -858,21 +858,21 @@ class BaseWolfeLineSearchStrategy(LineSearchStrategy):
         # We don't have direct access to the step size from the CUDA kernel
         # Could be added as an output if needed
         selected_state = LineSearchState(
-            action=new_iteration_state.action.detach().view(
+            action=new_iteration_state.action.detach().contiguous().view(
                 b, context.action_horizon, context.action_dim
             ),
             cost=new_iteration_state.cost.detach(),
-            gradient=new_iteration_state.gradient.detach().view(
+            gradient=new_iteration_state.gradient.detach().contiguous().view(
                 b, context.action_horizon, context.action_dim
             ),
             idxs=selected_idx,
         )
         exploration_state = LineSearchState(
-            action=new_iteration_state.exploration_action.detach().view(
+            action=new_iteration_state.exploration_action.detach().contiguous().view(
                 b, context.action_horizon, context.action_dim
             ),
             cost=new_iteration_state.exploration_cost.detach(),
-            gradient=new_iteration_state.exploration_gradient.detach().view(
+            gradient=new_iteration_state.exploration_gradient.detach().contiguous().view(
                 b, context.action_horizon, context.action_dim
             ),
             idxs=exploration_idx,

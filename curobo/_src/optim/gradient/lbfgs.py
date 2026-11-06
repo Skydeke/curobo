@@ -294,8 +294,8 @@ class LBFGSOpt:
             iteration_state.step_direction, iteration_state.exploration_action, scales
         ).reshape(context.num_problems, context.n_linesearch, context.opt_dim).detach()
         self._qn.set_reference(
-            iteration_state.exploration_action.view(-1, self._core.opt_dim, 1),
-            iteration_state.exploration_gradient.view(-1, self._core.opt_dim, 1),
+            iteration_state.exploration_action.contiguous().view(-1, self._core.opt_dim, 1),
+            iteration_state.exploration_gradient.contiguous().view(-1, self._core.opt_dim, 1),
             mask=mask,
         )
 
