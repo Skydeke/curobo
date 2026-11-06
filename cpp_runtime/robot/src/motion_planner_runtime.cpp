@@ -254,11 +254,17 @@ void MotionPlannerRuntime::attach_object(
 }
 
 void MotionPlannerRuntime::set_link_collision_enabled(const std::string& link_name, bool enabled) {
+  // A MotionPlanner owns three collision consumers; a link allowance must apply
+  // to all of them or RRT/TrajOpt reject states the IK stage already accepts.
   inverse_kinematics_->set_link_collision_enabled(link_name, enabled);
+  rrt_->set_link_collision_enabled(link_name, enabled);
+  trajectory_optimizer_->set_link_collision_enabled(link_name, enabled);
 }
 
 void MotionPlannerRuntime::set_link_collision_mask(const std::string& link_name, uint32_t layers) {
   inverse_kinematics_->set_link_collision_mask(link_name, layers);
+  rrt_->set_link_collision_mask(link_name, layers);
+  trajectory_optimizer_->set_link_collision_mask(link_name, layers);
 }
 
 void MotionPlannerRuntime::detach_object(const std::string& link_name) {
