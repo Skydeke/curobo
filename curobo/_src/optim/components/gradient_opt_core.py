@@ -41,7 +41,7 @@ def _scale_step_direction(
     optimization_step_max: torch.Tensor,
 ) -> torch.Tensor:
     """Scale each flat optimization direction with one batch-wise normalizer."""
-    flat_direction = step_direction.view(step_direction.shape[0], -1)
+    flat_direction = step_direction.contiguous().view(step_direction.shape[0], -1)
     scale = torch.amax(
         torch.abs(flat_direction) / optimization_step_max.view(1, -1),
         dim=-1,
@@ -491,13 +491,15 @@ class GradientOptCore:
     ) -> OptimizationIterationState:
         initial_particles = 1 if len(self._rollout_list) > 1 else self.config.num_particles
         action_set = (
-            iteration_state.exploration_action.view(self.config.num_problems, 1, self.opt_dim)
+            iteration_state.exploration_action.contiguous().view(
+                self.config.num_problems, 1, self.opt_dim
+            )
             .expand(-1, initial_particles, -1)
             .contiguous()
         )
         cost, gradient = self._compute_cost_constraint_and_gradient_initial(action_set)
         baseline_cost = cost[:, 0, 0].detach()
-        baseline_gradient = gradient[:, 0].view(
+        baseline_gradient = gradient[:, 0].contiguous().view(
             self.config.num_problems, self.action_horizon, self.action_dim
         )
         iteration_state.action.copy_(iteration_state.exploration_action)

@@ -148,6 +148,18 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def load_config(path: Path) -> dict[str, Any]:
+    """Read an authored mapper config as YAML (JSON remains accepted)."""
+    if path.suffix.lower() in (".yaml", ".yml"):
+        import yaml
+
+        document = yaml.safe_load(path.read_text())
+        if not isinstance(document, dict):
+            raise ValueError(f"{path} must contain a YAML mapping")
+        return document
+    return load_json(path)
+
+
 def cuda_arch() -> tuple[int, str]:
     device = Device()
     device.set_current()
@@ -491,7 +503,7 @@ def main() -> None:
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    config = load_json(args.config)
+    config = load_config(args.config)
     arch, arch_name = cuda_arch()
     cfg, integrator = make_integrator(config)
     warp_manifest = export_warp_kernels(integrator, args.out, arch, arch_name)
