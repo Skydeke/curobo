@@ -605,6 +605,12 @@ def main() -> None:
         help="disable motion IK/RRT/TrajOpt effort checks; retiming still uses inverse dynamics",
     )
     parser.add_argument(
+        "--payload",
+        choices=("both", "0", "3"),
+        default="both",
+        help="which motion payload pass to run: both (default), 0 kg, or 3 kg",
+    )
+    parser.add_argument(
         "--target-device", type=Path,
         help="prepare artifacts for a device JSON; requires --prepare-only and skips host build",
     )
@@ -740,7 +746,12 @@ def main() -> None:
         summary["motion_interpolation_buffer_size"] = next(iter(datasets.values()))[
             "interpolation_buffer_size"
         ]
-    for has_payload in (False, True):
+    payloads = (
+        (False, True) if args.payload == "both"
+        else (False,) if args.payload == "0"
+        else (True,)
+    )
+    for has_payload in payloads:
         if not datasets:
             break
         for name, dataset in datasets.items():
