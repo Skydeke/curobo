@@ -188,7 +188,7 @@ def make_integrator(config: dict[str, Any]):
         depth_maximum_distance=float(config["depth_maximum_distance"]),
         minimum_tsdf_weight=float(config["minimum_tsdf_weight"]),
         adjacent_skip_steps=float(config.get("adjacent_skip_steps", 1.0)),
-        grid_shape=tuple(int(v) for v in config["grid_shape"]),
+        grid_shape=tuple(int(v) for v in reversed(config["grid_shape"])),
         image_height=int(config["image_height"]),
         image_width=int(config["image_width"]),
         enable_static=False,
@@ -439,7 +439,7 @@ def compile_pose_refiner_lm(out_dir: Path, arch_name: str) -> dict[str, Any]:
 
 def normalized_config(config: dict[str, Any], kernels, integrator: object) -> dict[str, Any]:
     cfg = dict(config)
-    cfg["grid_shape"] = [int(v) for v in config["grid_shape"]]
+    cfg["grid_shape"] = [int(v) for v in reversed(config["grid_shape"])]
     cfg["esdf_grid_shape"] = [int(v) for v in config["esdf_grid_shape"]]
     cfg["origin"] = [float(v) for v in config.get("origin", [0.0, 0.0, 0.0])]
     cfg["num_samples"] = int(kernels.num_samples)
