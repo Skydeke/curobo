@@ -8,6 +8,15 @@
 
 #include "curobo_robot_runtime/api.h"
 
+#include <vector>
+
+namespace curobo_robot_runtime {
+/** Replace the fixed transforms in every live native stage using this artifact. */
+CUROBO_ROBOT_API void update_artifact_fixed_transforms(
+    const std::string& artifact_dir, int device_ordinal,
+    const std::vector<float>& data);
+}  // namespace curobo_robot_runtime
+
 namespace curobo::robot {
 
 /** Typed C++ interface for artifact-backed forward kinematics and Jacobians. */

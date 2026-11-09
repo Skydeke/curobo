@@ -450,6 +450,14 @@ class RobotRuntimeImpl {
   const std::string& joint_name(int index) const;
   const std::string& tool_frame_name(int index) const;
   void compute_kinematics(const CuroboRobotKinematicsRequest& request) const;
+  /** Replace the per-link fixed transforms on this stage's device model.
+   *
+   * Unpinned lock joints (``lock_joints: {joint: null}``) are baked into these
+   * transforms at export time. The bridge calls this after the Python model
+   * updates them from the task's current/configured joint values, so every
+   * native stage (IK, RRT, TrajOpt, rollout) sees the same gripper geometry.
+   */
+  void update_fixed_transforms(const std::vector<float>& data);
 
   struct ModelDeviceView {
     CUdeviceptr fixed_transforms{0};
@@ -490,6 +498,12 @@ class RobotRuntimeImpl {
   DeviceBuffer link_masses_com_;
   KernelModule kernel_;
 };
+
+/** Upload one fixed-transform tensor into every live robot runtime that uses
+ *  the same artifact directory/device (IK, RRT, TrajOpt, rollout, ...). */
+CUROBO_ROBOT_API void update_artifact_fixed_transforms(
+    const std::string& artifact_dir, int device_ordinal,
+    const std::vector<float>& data);
 
 RobotManifest load_manifest(const std::string& artifact_dir);
 TimeOptManifest load_timeopt_manifest(const std::string &artifact_dir, int knots, bool reference);

@@ -12,8 +12,10 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace curobo_robot_runtime {
@@ -1561,6 +1563,33 @@ void KernelModule::launch(unsigned int grid_x, unsigned int block_x,
                               stream, const_cast<void**>(arguments.data()), nullptr));
 }
 
+namespace {
+
+std::mutex & fixed_transform_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unordered_map<std::string, std::vector<RobotRuntimeImpl *>> &
+fixed_transform_registry() {
+  static std::unordered_map<std::string, std::vector<RobotRuntimeImpl *>>
+    registry;
+  return registry;
+}
+
+std::unordered_map<std::string, std::vector<float>> &
+latest_fixed_transforms() {
+  static std::unordered_map<std::string, std::vector<float>> latest;
+  return latest;
+}
+
+std::string fixed_transform_key(
+    const std::string & artifact_dir, int device_ordinal) {
+  return artifact_dir + "#" + std::to_string(device_ordinal);
+}
+
+}  // namespace
+
 RobotRuntimeImpl::RobotRuntimeImpl(std::string artifact_dir, int device_ordinal)
     : artifact_dir_(std::move(artifact_dir)), device_ordinal_(device_ordinal) {
   CRR_CU_CHECK(cuInit(0));
@@ -1568,14 +1597,66 @@ RobotRuntimeImpl::RobotRuntimeImpl(std::string artifact_dir, int device_ordinal)
   manifest_ = load_manifest(artifact_dir_);
   validate_device_architecture();
   load_model();
+  {
+    std::lock_guard<std::mutex> lock(fixed_transform_mutex());
+    const std::string key = fixed_transform_key(artifact_dir_, device_ordinal_);
+    const auto latest = latest_fixed_transforms().find(key);
+    if (latest != latest_fixed_transforms().end()) {
+      update_fixed_transforms(latest->second);
+    }
+    fixed_transform_registry()[key].push_back(this);
+  }
   const auto cubin_path =
       (std::filesystem::path(artifact_dir_) / manifest_.kernel.cubin).string();
   kernel_.load(cubin_path, manifest_.kernel.symbol);
 }
 
 RobotRuntimeImpl::~RobotRuntimeImpl() {
+  {
+    std::lock_guard<std::mutex> lock(fixed_transform_mutex());
+    const std::string key = fixed_transform_key(artifact_dir_, device_ordinal_);
+    auto it = fixed_transform_registry().find(key);
+    if (it != fixed_transform_registry().end()) {
+      auto & instances = it->second;
+      instances.erase(
+        std::remove(instances.begin(), instances.end(), this), instances.end());
+      if (instances.empty()) {
+        fixed_transform_registry().erase(it);
+      }
+    }
+  }
   // Members release CUDA resources after this body executes.
   cudaSetDevice(device_ordinal_);
+}
+
+void RobotRuntimeImpl::update_fixed_transforms(const std::vector<float> & data) {
+  const std::size_t expected = manifest_.fixed_transforms.bytes;
+  if (data.size() * sizeof(float) != expected) {
+    throw std::invalid_argument(
+      "fixed_transforms size " + std::to_string(data.size() * sizeof(float)) +
+      " does not match artifact tensor " + std::to_string(expected));
+  }
+  std::vector<uint8_t> bytes(data.size() * sizeof(float));
+  std::memcpy(bytes.data(), data.data(), bytes.size());
+  fixed_transforms_.upload(bytes);
+  CRR_CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void update_artifact_fixed_transforms(
+    const std::string & artifact_dir, int device_ordinal,
+    const std::vector<float> & data) {
+  std::lock_guard<std::mutex> lock(fixed_transform_mutex());
+  const std::string key = fixed_transform_key(artifact_dir, device_ordinal);
+  latest_fixed_transforms()[key] = data;
+  const auto it = fixed_transform_registry().find(key);
+  if (it == fixed_transform_registry().end()) {
+    return;
+  }
+  for (auto * instance : it->second) {
+    if (instance != nullptr) {
+      instance->update_fixed_transforms(data);
+    }
+  }
 }
 
 void RobotRuntimeImpl::validate_device_architecture() const {
