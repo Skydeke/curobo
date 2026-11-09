@@ -1636,6 +1636,7 @@ void RobotRuntimeImpl::update_fixed_transforms(const std::vector<float> & data) 
       "fixed_transforms size " + std::to_string(data.size() * sizeof(float)) +
       " does not match artifact tensor " + std::to_string(expected));
   }
+  CRR_CUDA_CHECK(cudaSetDevice(device_ordinal_));
   std::vector<uint8_t> bytes(data.size() * sizeof(float));
   std::memcpy(bytes.data(), data.data(), bytes.size());
   fixed_transforms_.upload(bytes);
