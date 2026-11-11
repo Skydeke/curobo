@@ -356,6 +356,7 @@ namespace curobo{
                partner_idx,
                local_weight);
            }
+           __syncwarp();
            curobo::common::block_reduce_sum(
              local_sum, num_threads_per_block, block_reduce_shared_data, reduced_sum);
            return *reduced_sum;
@@ -422,6 +423,7 @@ namespace curobo{
                  gradients_shared, sphere_a, sphere_b, sphere_pair.x, sphere_pair.y, local_weight);
              }
            }
+           __syncwarp();
            curobo::common::block_reduce_sum(
              local_sum, num_threads_per_block, block_reduce_shared_data, reduced_sum);
            return *reduced_sum;
@@ -488,6 +490,7 @@ namespace curobo{
              }
            }
 
+           __syncwarp();
            curobo::common::block_reduce_max(
              max_d,
              num_threads_per_block,
@@ -553,6 +556,10 @@ namespace curobo{
                }
              }
            }
+           // The pair loop has a different trip count per lane. Volta+ can keep
+           // those lanes diverged at the loop exit, and the warp reduction below
+           // would then only see the active subset.
+           __syncwarp();
            curobo::common::block_reduce_sum(
              local_sum, num_threads_per_block, block_reduce_shared_data, reduced_sum);
            return *reduced_sum;
