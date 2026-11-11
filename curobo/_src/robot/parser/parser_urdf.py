@@ -35,6 +35,7 @@ class UrdfRobotParser(RobotParser):
         mesh_root: str = "",
         extra_links: Optional[Dict[str, LinkParams]] = None,
         build_scene_graph: bool = False,
+        continuous_joint_limits: Optional[Dict[str, List[float]]] = None,
     ) -> None:
         """Initialize instance with URDF file path.
 
@@ -45,9 +46,17 @@ class UrdfRobotParser(RobotParser):
             extra_links: Extra links to add to the kinematic tree.
             build_scene_graph: Build scene graph for the robot. Set this to True if you want to
                 determine the root link of the robot.
+            continuous_joint_limits: Per-joint ``[lower, upper]`` overrides for
+                URDF ``continuous`` joints. cuRobo has no periodic joint type,
+                so a continuous joint is planned as a revolute one inside a
+                finite window. The default window is ``[-2*pi, 2*pi]``; this
+                map lets a robot config choose its own window (e.g. larger for
+                a wheel, tighter for an arm joint). Bounded URDF joints are
+                never affected.
         """
         # load robot from urdf:
         self._mesh_root = mesh_root
+        self._continuous_joint_limits = dict(continuous_joint_limits or {})
 
         self._robot = yourdfpy.URDF.load(
             urdf_path,
@@ -113,10 +122,34 @@ class UrdfRobotParser(RobotParser):
                 "velocity": joint.limit.velocity,
             }
         else:
+            # cuRobo has no periodic joint type, so a continuous joint is
+            # planned as a revolute joint inside a finite window. The robot
+            # config can override that window per joint; otherwise keep the
+            # historical [-2*pi, 2*pi] default.
+            override = self._continuous_joint_limits.get(joint.name)
+            if override is not None:
+                if (
+                    not isinstance(override, (list, tuple))
+                    or len(override) != 2
+                    or not all(np.isfinite(float(v)) for v in override)
+                    or float(override[0]) >= float(override[1])
+                ):
+                    log_and_raise(
+                        "continuous_joint_limits['"
+                        + joint.name
+                        + "'] must be a finite [lower, upper] pair with lower < upper"
+                    )
+                lower, upper = float(override[0]), float(override[1])
+            else:
+                lower, upper = -3.14 * 2, 3.14 * 2
             log_warn(
                 "Converting continuous joint: "
                 + joint.name
-                + " to revolute with limits [-6.28,6.28]"
+                + " to revolute with limits ["
+                + str(lower)
+                + ","
+                + str(upper)
+                + "]"
             )
             joint_type = "revolute"
             # Continuous joints may omit the optional <limit> element entirely;
@@ -125,8 +158,8 @@ class UrdfRobotParser(RobotParser):
             limit = joint.limit
             joint_limits = {
                 "effort": None if limit is None else limit.effort,
-                "lower": -3.14 * 2,
-                "upper": 3.14 * 2,
+                "lower": lower,
+                "upper": upper,
                 "velocity": None if limit is None else limit.velocity,
             }
 

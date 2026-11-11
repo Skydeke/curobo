@@ -124,6 +124,14 @@ class KinematicsLoaderCfg:
     #: being pinned. An unpinned lock defaults to 0.0 before the first state arrives.
     lock_joints: Optional[Dict[str, Optional[float]]] = None
 
+    #: Per-joint ``[lower, upper]`` window for URDF ``continuous`` joints, e.g.
+    #: ``{"wheel_joint": [-12.56, 12.56]}``. cuRobo plans a continuous joint as
+    #: a revolute joint inside a finite window because it has no periodic joint
+    #: type; without this map the parser uses ``[-2*pi, 2*pi]``. Bounded joints
+    #: are unaffected. Use this to choose a window that fits your controller and
+    #: the joint's real travel.
+    continuous_joint_limits: Optional[Dict[str, List[float]]] = None
+
     #: Additional links to add to parsed kinematics tree. This is useful for adding fixed links
     #: that are not present in the URDF or USD.
     extra_links: Optional[Dict[str, LinkParams]] = None

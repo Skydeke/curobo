@@ -407,7 +407,7 @@ def test_exported_trajopt_collision_weights_match_python_rollouts(
     )
     torch.testing.assert_close(
         tensors["validation_self_collision_weight"],
-        torch.tensor([0.015625], dtype=torch.float32),
+        torch.tensor([4.0], dtype=torch.float32),
     )
 
 

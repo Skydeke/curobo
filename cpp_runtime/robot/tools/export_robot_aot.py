@@ -1150,14 +1150,12 @@ def build_trajopt_tensors(
     )
     optimizer_self_collision_weight = self_collision.weight / optimizer_interpolation_steps
     metrics_self_collision_weight = metrics_self_collision.weight / metrics_interpolation_steps
-    # SolverCore constructs two metrics RobotRollouts before TrajOptSolver adds
-    # the dense-validation rollout. Each RobotRollout constructs two cost
-    # managers, and the self-collision manager scales its shared configuration
-    # once per construction. The dense rollout therefore observes the fifth
-    # interpolation scaling of the metrics weight.
-    validation_self_collision_weight = metrics_self_collision.weight / (
-        metrics_interpolation_steps**5
-    )
+    # RobotCostManager now copies the shared self-collision config before
+    # applying the interpolation scaling, so the weight is divided exactly once
+    # per manager. The dense-validation rollout is another metrics-lane manager
+    # and therefore uses the same W/s as the metrics rollout. (It used to pin
+    # W/s^5, the compounded value produced by the old in-place mutation.)
+    validation_self_collision_weight = metrics_self_collision_weight
     target_dof_weight = cspace.cspace_target_dof_weight
     if target_dof_weight.numel() == 0:
         target_dof_weight = torch.ones(

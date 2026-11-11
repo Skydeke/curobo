@@ -115,6 +115,7 @@ class KinematicsLoader(KinematicsLoaderCfg):
             mesh_root=self.asset_root_path,
             extra_links=self.extra_links,
             load_meshes=self.load_meshes,
+            continuous_joint_limits=self.continuous_joint_limits,
         )
 
         # A `None` lock value marks an *unpinned* lock: the joint stays locked

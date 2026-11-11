@@ -206,6 +206,58 @@ class TestUrdfRobotParserJointLimits:
         with pytest.raises(ValueError, match="has no <limit> element"):
             parser.get_link_parameters("joint_link", base=False)
 
+    def test_continuous_joint_limits_override(self, tmp_path):
+        """The robot config can choose its own continuous-joint window."""
+        urdf_content = """<?xml version="1.0"?>
+<robot name="test_robot">
+  <link name="base_link"/>
+  <link name="joint_link"/>
+  <joint name="continuous_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="joint_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="100" velocity="2.0"/>
+  </joint>
+</robot>"""
+
+        urdf_path = tmp_path / "continuous_joint.urdf"
+        urdf_path.write_text(urdf_content)
+
+        parser = UrdfRobotParser(
+            urdf_path=str(urdf_path),
+            continuous_joint_limits={"continuous_joint": [-1.5, 2.5]},
+        )
+        link_params = parser.get_link_parameters("joint_link", base=False)
+        assert link_params.joint_limits is not None
+        assert link_params.joint_limits[0] == pytest.approx(-1.5)
+        assert link_params.joint_limits[1] == pytest.approx(2.5)
+
+    def test_continuous_joint_limits_override_rejects_invalid_pair(self, tmp_path):
+        """A bad override fails loudly instead of silently using the default."""
+        urdf_content = """<?xml version="1.0"?>
+<robot name="test_robot">
+  <link name="base_link"/>
+  <link name="joint_link"/>
+  <joint name="continuous_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="joint_link"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="100" velocity="2.0"/>
+  </joint>
+</robot>"""
+
+        urdf_path = tmp_path / "continuous_joint.urdf"
+        urdf_path.write_text(urdf_content)
+
+        parser = UrdfRobotParser(
+            urdf_path=str(urdf_path),
+            continuous_joint_limits={"continuous_joint": [1.0, 1.0]},
+        )
+        with pytest.raises(Exception):
+            parser.get_link_parameters("joint_link", base=False)
+
+
     def test_get_joint_name_method(self, franka_parser):
         """Test _get_joint_name method (lines 92-93)."""
         # Get the name of the first joint
