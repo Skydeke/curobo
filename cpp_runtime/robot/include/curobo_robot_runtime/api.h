@@ -82,6 +82,58 @@ CUROBO_ROBOT_API int curobo_robot_compute_kinematics(
     CuroboRobotRuntime* runtime,
     const CuroboRobotKinematicsRequest* request);
 
+/**
+ * Device tensors for the artifact's collision-sphere forward kinematics.
+ *
+ * joint_positions: [batch_size, horizon, num_dof]
+ * robot_spheres:   [batch_size, horizon, num_spheres, 4] (x, y, z, radius)
+ */
+typedef struct CuroboRobotSphereRequest {
+  uint64_t joint_positions;
+  uint64_t robot_spheres;
+  uint64_t stream;
+  int batch_size;
+  int horizon;
+} CuroboRobotSphereRequest;
+
+/** Dimensions of the artifact's collision-sphere model. */
+typedef struct CuroboRobotSphereModelInfo {
+  int num_spheres;
+  int num_self_collision_pairs;
+} CuroboRobotSphereModelInfo;
+
+/**
+ * Read the dimensions of the exported sphere model.
+ *
+ * All tensors exposed by the copy function are the artifact's own model data,
+ * not a re-fitted or caller-supplied approximation.
+ */
+CUROBO_ROBOT_API int curobo_robot_get_sphere_model_info(
+    CuroboRobotRuntime* runtime,
+    CuroboRobotSphereModelInfo* info);
+
+/**
+ * Copy the artifact's static sphere model to host memory.
+ *
+ * link_spheres:          [num_spheres, 4] link-local x, y, z, radius
+ * self_collision_padding:[num_spheres]
+ * self_collision_pairs:  [num_self_collision_pairs, 2]
+ * link_sphere_map:       [num_spheres] link index for each sphere
+ *
+ * Any pointer for a zero-length tensor may be null.
+ */
+CUROBO_ROBOT_API int curobo_robot_copy_sphere_model(
+    CuroboRobotRuntime* runtime,
+    float* link_spheres,
+    float* self_collision_padding,
+    int16_t* self_collision_pairs,
+    int16_t* link_sphere_map);
+
+/** Enqueue the artifact's fused collision-sphere forward kinematics. */
+CUROBO_ROBOT_API int curobo_robot_compute_spheres(
+    CuroboRobotRuntime* runtime,
+    const CuroboRobotSphereRequest* request);
+
 #ifdef __cplusplus
 }
 #endif

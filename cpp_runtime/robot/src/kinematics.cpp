@@ -72,4 +72,38 @@ void Kinematics::forward(const float* joint_positions, float* link_positions,
   throw_on_error(curobo_robot_compute_kinematics(runtime_, &request));
 }
 
+SphereModel Kinematics::sphere_model() const {
+  CuroboRobotSphereModelInfo info{};
+  throw_on_error(curobo_robot_get_sphere_model_info(runtime_, &info));
+  SphereModel model;
+  model.num_spheres = info.num_spheres;
+  model.num_self_collision_pairs = info.num_self_collision_pairs;
+  if (model.num_spheres <= 0) {
+    return model;
+  }
+  model.link_spheres.resize(static_cast<std::size_t>(model.num_spheres) * 4);
+  model.self_collision_padding.resize(static_cast<std::size_t>(model.num_spheres));
+  model.link_sphere_map.resize(static_cast<std::size_t>(model.num_spheres));
+  model.self_collision_pairs.resize(
+      static_cast<std::size_t>(model.num_self_collision_pairs) * 2);
+  throw_on_error(curobo_robot_copy_sphere_model(
+      runtime_, model.link_spheres.data(), model.self_collision_padding.data(),
+      model.self_collision_pairs.empty() ? nullptr : model.self_collision_pairs.data(),
+      model.link_sphere_map.data()));
+  return model;
+}
+
+void Kinematics::forward_spheres(const float* joint_positions, float* robot_spheres,
+                                 int batch_size, int horizon,
+                                 cudaStream_t stream) const {
+  const CuroboRobotSphereRequest request{
+      reinterpret_cast<std::uintptr_t>(joint_positions),
+      reinterpret_cast<std::uintptr_t>(robot_spheres),
+      reinterpret_cast<std::uintptr_t>(stream),
+      batch_size,
+      horizon,
+  };
+  throw_on_error(curobo_robot_compute_spheres(runtime_, &request));
+}
+
 }  // namespace curobo::robot

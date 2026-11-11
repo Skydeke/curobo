@@ -403,6 +403,28 @@ RobotManifest load_manifest(const std::string& artifact_dir) {
     validate_tensor(manifest.link_masses_com, "float32",
                     num_links * 4 * sizeof(float), "link_masses_com");
   }
+  // The collision-sphere model lives in the companion IK manifest. Treat it as
+  // optional: a kinematics-only artifact can still do tool-frame FK, while the
+  // sphere API reports an explicit "model unavailable" error.
+  const auto ik_manifest_path =
+      std::filesystem::path(artifact_dir) / "robot_ik_manifest.json";
+  if (std::filesystem::exists(ik_manifest_path)) {
+    try {
+      const auto ik = load_ik_manifest(artifact_dir);
+      if (ik.num_spheres > 0 && !ik.link_spheres.file.empty() &&
+          !ik.kinematics.cubin.empty() && !ik.kinematics.symbol.empty()) {
+        manifest.num_spheres = ik.num_spheres;
+        manifest.num_self_collision_pairs = ik.num_self_collision_pairs;
+        manifest.link_spheres = ik.link_spheres;
+        manifest.link_sphere_map = ik.link_sphere_map;
+        manifest.self_collision_padding = ik.self_collision_padding;
+        manifest.self_collision_pairs = ik.self_collision_pairs;
+        manifest.sphere_kernel = ik.kinematics;
+      }
+    } catch (const std::exception&) {
+      // Keep the base FK API usable; compute_spheres() will report the gap.
+    }
+  }
   return manifest;
 }
 
@@ -1709,6 +1731,36 @@ void RobotRuntimeImpl::load_model() {
     link_masses_com_.upload(
         read_tensor(directory, manifest_.link_masses_com, "link_masses_com"));
   }
+  if (!manifest_.link_spheres.file.empty()) {
+    const auto spheres = read_tensor(directory, manifest_.link_spheres, "link_spheres");
+    const auto sphere_map =
+        read_tensor(directory, manifest_.link_sphere_map, "link_sphere_map");
+    link_spheres_.upload(spheres);
+    link_sphere_map_.upload(sphere_map);
+    host_link_spheres_.resize(spheres.size() / sizeof(float));
+    std::memcpy(host_link_spheres_.data(), spheres.data(), spheres.size());
+    host_link_sphere_map_.resize(sphere_map.size() / sizeof(int16_t));
+    std::memcpy(host_link_sphere_map_.data(), sphere_map.data(), sphere_map.size());
+    if (!manifest_.self_collision_padding.file.empty()) {
+      const auto padding = read_tensor(
+          directory, manifest_.self_collision_padding, "self_collision_padding");
+      host_self_collision_padding_.resize(padding.size() / sizeof(float));
+      std::memcpy(host_self_collision_padding_.data(), padding.data(), padding.size());
+    }
+    if (!manifest_.self_collision_pairs.file.empty()) {
+      const auto pairs = read_tensor(
+          directory, manifest_.self_collision_pairs, "self_collision_pairs");
+      host_self_collision_pairs_.resize(pairs.size() / sizeof(int16_t));
+      std::memcpy(host_self_collision_pairs_.data(), pairs.data(), pairs.size());
+    }
+    if (!manifest_.sphere_kernel.cubin.empty()) {
+      sphere_kernel_.load(
+          (directory / manifest_.sphere_kernel.cubin).string(),
+          manifest_.sphere_kernel.symbol);
+      sphere_kernel_.set_max_dynamic_shared_memory(
+          manifest_.sphere_kernel.max_dynamic_shared_memory);
+    }
+  }
 }
 
 CuroboRobotInfo RobotRuntimeImpl::info() const {
@@ -1842,6 +1894,156 @@ void RobotRuntimeImpl::compute_kinematics(
   };
   const auto stream = reinterpret_cast<CUstream>(static_cast<uintptr_t>(request.stream));
   kernel_.launch(grid_x, block_x, shared_memory, stream, arguments);
+}
+
+CuroboRobotSphereModelInfo RobotRuntimeImpl::sphere_model_info() const {
+  return CuroboRobotSphereModelInfo{
+      manifest_.num_spheres,
+      manifest_.num_self_collision_pairs,
+  };
+}
+
+void RobotRuntimeImpl::copy_sphere_model(
+    float* link_spheres, float* self_collision_padding,
+    int16_t* self_collision_pairs, int16_t* link_sphere_map) const {
+  if (manifest_.num_spheres <= 0 || host_link_spheres_.empty()) {
+    throw std::runtime_error("artifact has no collision-sphere model");
+  }
+  if (link_spheres != nullptr) {
+    std::memcpy(link_spheres, host_link_spheres_.data(),
+                host_link_spheres_.size() * sizeof(float));
+  }
+  if (self_collision_padding != nullptr &&
+      host_self_collision_padding_.size() == host_link_spheres_.size() / 4) {
+    std::memcpy(self_collision_padding, host_self_collision_padding_.data(),
+                host_self_collision_padding_.size() * sizeof(float));
+  }
+  if (self_collision_pairs != nullptr && !host_self_collision_pairs_.empty()) {
+    std::memcpy(self_collision_pairs, host_self_collision_pairs_.data(),
+                host_self_collision_pairs_.size() * sizeof(int16_t));
+  }
+  if (link_sphere_map != nullptr &&
+      host_link_sphere_map_.size() == host_link_spheres_.size() / 4) {
+    std::memcpy(link_sphere_map, host_link_sphere_map_.data(),
+                host_link_sphere_map_.size() * sizeof(int16_t));
+  }
+}
+
+void RobotRuntimeImpl::compute_spheres(const CuroboRobotSphereRequest& request) {
+  CRR_CUDA_CHECK(cudaSetDevice(device_ordinal_));
+  if (manifest_.num_spheres <= 0 || manifest_.sphere_kernel.cubin.empty()) {
+    throw std::runtime_error("artifact has no collision-sphere kinematics");
+  }
+  if (request.joint_positions == 0 || request.robot_spheres == 0) {
+    throw std::invalid_argument("sphere CUDA tensor addresses must be nonzero");
+  }
+  if (request.batch_size <= 0 || request.horizon <= 0) {
+    throw std::invalid_argument("batch_size and horizon must be positive");
+  }
+  const int64_t flattened_batch =
+      static_cast<int64_t>(request.batch_size) * static_cast<int64_t>(request.horizon);
+  if (flattened_batch > INT_MAX) {
+    throw std::invalid_argument("batch_size * horizon exceeds the kernel integer range");
+  }
+
+  const auto& policy = manifest_.sphere_kernel;
+  const int64_t shared_memory_per_batch_value =
+      static_cast<int64_t>(manifest_.num_links) * 12 * sizeof(float) * 2;
+  if (shared_memory_per_batch_value > policy.max_dynamic_shared_memory) {
+    throw std::runtime_error("robot requires more dynamic shared memory than the artifact allows");
+  }
+  const int shared_memory_per_batch = static_cast<int>(shared_memory_per_batch_value);
+  const int thread_limited_batches =
+      policy.max_threads_per_block / policy.threads_per_batch;
+  const int shared_memory_limited_batches =
+      policy.max_dynamic_shared_memory / shared_memory_per_batch;
+  const int batches_per_block = std::min(
+      {static_cast<int>(flattened_batch), policy.max_batches_per_block,
+       thread_limited_batches, shared_memory_limited_batches});
+  if (batches_per_block <= 0) {
+    throw std::runtime_error("sphere kinematics launch policy produced an empty block");
+  }
+
+  const auto block_x =
+      static_cast<unsigned int>(batches_per_block * policy.threads_per_batch);
+  const auto grid_x = static_cast<unsigned int>(
+      (flattened_batch + batches_per_block - 1) / batches_per_block);
+  const auto shared_memory =
+      static_cast<unsigned int>(batches_per_block * shared_memory_per_batch);
+
+  const auto ensure_scratch = [](DeviceBuffer& buffer, std::size_t bytes) {
+      if (buffer.bytes() < bytes) {
+        buffer.allocate(bytes);
+      }
+    };
+  const auto states = static_cast<std::size_t>(flattened_batch);
+  const auto tools = static_cast<std::size_t>(manifest_.num_tool_frames);
+  ensure_scratch(sphere_link_positions_, states * tools * 3 * sizeof(float));
+  ensure_scratch(sphere_link_quaternions_, states * tools * 4 * sizeof(float));
+  ensure_scratch(
+      sphere_link_jacobians_,
+      states * tools * 6 * static_cast<std::size_t>(manifest_.num_dof) *
+      sizeof(float));
+  ensure_scratch(
+      sphere_global_cumul_,
+      states * static_cast<std::size_t>(manifest_.num_links) * 12 * sizeof(float));
+
+  CUdeviceptr link_positions = sphere_link_positions_.ptr();
+  CUdeviceptr link_quaternions = sphere_link_quaternions_.ptr();
+  CUdeviceptr robot_spheres = request.robot_spheres;
+  CUdeviceptr batch_center_of_mass = 0;
+  CUdeviceptr link_jacobians = sphere_link_jacobians_.ptr();
+  CUdeviceptr global_cumul_mat = sphere_global_cumul_.ptr();
+  CUdeviceptr joint_positions = request.joint_positions;
+  CUdeviceptr fixed_transforms = fixed_transforms_.ptr();
+  CUdeviceptr sphere_config = link_spheres_.ptr();
+  CUdeviceptr link_masses_com = 0;
+  CUdeviceptr joint_map_type = joint_map_type_.ptr();
+  CUdeviceptr joint_map = joint_map_.ptr();
+  CUdeviceptr link_map = link_map_.ptr();
+  CUdeviceptr tool_frame_map = tool_frame_map_.ptr();
+  CUdeviceptr link_sphere_map = link_sphere_map_.ptr();
+  CUdeviceptr tool_joint_links_data = tool_joint_links_data_.ptr();
+  CUdeviceptr tool_joint_links_offsets = tool_joint_links_offsets_.ptr();
+  CUdeviceptr joint_offset_map = joint_offset_map_.ptr();
+  CUdeviceptr env_query_idx = 0;
+  int kernel_batch_size = static_cast<int>(flattened_batch);
+  int horizon = request.horizon;
+  int num_spheres = manifest_.num_spheres;
+  int num_environments = 1;
+  int num_links = manifest_.num_links;
+  int num_dof = manifest_.num_dof;
+  int num_tool_frames = manifest_.num_tool_frames;
+  std::vector<void*> arguments = {
+      &link_positions,
+      &link_quaternions,
+      &robot_spheres,
+      &batch_center_of_mass,
+      &link_jacobians,
+      &global_cumul_mat,
+      &joint_positions,
+      &fixed_transforms,
+      &sphere_config,
+      &link_masses_com,
+      &joint_map_type,
+      &joint_map,
+      &link_map,
+      &tool_frame_map,
+      &link_sphere_map,
+      &tool_joint_links_data,
+      &tool_joint_links_offsets,
+      &joint_offset_map,
+      &env_query_idx,
+      &kernel_batch_size,
+      &horizon,
+      &num_spheres,
+      &num_environments,
+      &num_links,
+      &num_dof,
+      &num_tool_frames,
+  };
+  const auto stream = reinterpret_cast<CUstream>(static_cast<uintptr_t>(request.stream));
+  sphere_kernel_.launch(grid_x, block_x, shared_memory, stream, arguments);
 }
 
 }  // namespace curobo_robot_runtime

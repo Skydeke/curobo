@@ -54,6 +54,17 @@ struct RobotManifest {
   TensorManifest joint_links_offsets;
   TensorManifest link_masses_com;
   KernelManifest kernel;
+
+  // Optional collision-sphere model from the companion IK manifest. Older
+  // artifacts (or kinematics-only exports) may not have these; the sphere API
+  // then reports that the model is unavailable instead of guessing.
+  int num_spheres{0};
+  int num_self_collision_pairs{0};
+  TensorManifest link_spheres;
+  TensorManifest link_sphere_map;
+  TensorManifest self_collision_padding;
+  TensorManifest self_collision_pairs;
+  KernelManifest sphere_kernel;
 };
 
 struct IkKernelManifest {
@@ -450,6 +461,14 @@ class RobotRuntimeImpl {
   const std::string& joint_name(int index) const;
   const std::string& tool_frame_name(int index) const;
   void compute_kinematics(const CuroboRobotKinematicsRequest& request) const;
+  /** Dimensions of the exported collision-sphere model. */
+  CuroboRobotSphereModelInfo sphere_model_info() const;
+  /** Copy the exported static sphere model to host memory. */
+  void copy_sphere_model(
+      float* link_spheres, float* self_collision_padding,
+      int16_t* self_collision_pairs, int16_t* link_sphere_map) const;
+  /** Enqueue collision-sphere forward kinematics. */
+  void compute_spheres(const CuroboRobotSphereRequest& request);
   /** Replace the per-link fixed transforms on this stage's device model.
    *
    * Unpinned lock joints (``lock_joints: {joint: null}``) are baked into these
@@ -497,6 +516,21 @@ class RobotRuntimeImpl {
   DeviceBuffer joint_links_offsets_;
   DeviceBuffer link_masses_com_;
   KernelModule kernel_;
+
+  // Collision-sphere model and the sphere-enabled FK kernel specialization.
+  DeviceBuffer link_spheres_;
+  DeviceBuffer link_sphere_map_;
+  std::vector<float> host_link_spheres_;
+  std::vector<float> host_self_collision_padding_;
+  std::vector<std::int16_t> host_self_collision_pairs_;
+  std::vector<std::int16_t> host_link_sphere_map_;
+  KernelModule sphere_kernel_;
+  // The public sphere request exposes only joint positions and sphere output;
+  // these scratch buffers satisfy the fused sphere+Jacobian kernel signature.
+  DeviceBuffer sphere_link_positions_;
+  DeviceBuffer sphere_link_quaternions_;
+  DeviceBuffer sphere_link_jacobians_;
+  DeviceBuffer sphere_global_cumul_;
 };
 
 /** Upload one fixed-transform tensor into every live robot runtime that uses

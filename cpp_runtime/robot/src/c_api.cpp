@@ -114,4 +114,35 @@ int curobo_robot_compute_kinematics(
   });
 }
 
+int curobo_robot_get_sphere_model_info(
+    CuroboRobotRuntime* runtime, CuroboRobotSphereModelInfo* info) {
+  return wrap([&] {
+    if (info == nullptr) {
+      throw std::runtime_error("sphere model info output pointer is null");
+    }
+    *info = checked(runtime).sphere_model_info();
+  });
+}
+
+int curobo_robot_copy_sphere_model(
+    CuroboRobotRuntime* runtime, float* link_spheres,
+    float* self_collision_padding, int16_t* self_collision_pairs,
+    int16_t* link_sphere_map) {
+  return wrap([&] {
+    checked(runtime).copy_sphere_model(
+        link_spheres, self_collision_padding, self_collision_pairs,
+        link_sphere_map);
+  });
+}
+
+int curobo_robot_compute_spheres(
+    CuroboRobotRuntime* runtime, const CuroboRobotSphereRequest* request) {
+  return wrap([&] {
+    if (request == nullptr) {
+      throw std::runtime_error("sphere request is null");
+    }
+    checked(runtime).compute_spheres(*request);
+  });
+}
+
 }  // extern "C"
