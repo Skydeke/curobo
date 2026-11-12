@@ -43,6 +43,11 @@ class MpcRuntime final {
     optimizer_config.finetune_attempts = 0;
     optimizer_config.trajectory_dt = config.trajectory_dt;
     optimizer_config.collision_activation_distance = config.collision_activation_distance;
+    // Joint states sit numerically on their limits (e.g. a lift at -2e-13 for
+    // a 0.0 lower bound). A zero tolerance turns that epsilon into a hard
+    // out-of-limit rejection, so the MPC refuses every plan from a valid rest
+    // pose. Keep the tolerance far below any physical motion.
+    optimizer_config.constraint_tolerance = 1e-4F;
     optimizer_ = std::make_unique<TrajectoryOptimizerRuntime>(
         source.artifact_directory_, optimizer_config, source.scene_handle_,
         source.trajectory_optimizer_->collision_);
