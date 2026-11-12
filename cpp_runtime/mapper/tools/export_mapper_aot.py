@@ -160,7 +160,10 @@ def load_config(path: Path) -> dict[str, Any]:
     return load_json(path)
 
 
-def cuda_arch() -> tuple[int, str]:
+def cuda_arch(override: str | None = None) -> tuple[int, str]:
+    if override:
+        arch = int(override.removeprefix("sm_"))
+        return arch, f"sm_{arch}"
     device = Device()
     device.set_current()
     arch = int(device.arch)
@@ -256,7 +259,7 @@ def export_warp_kernels(integrator, out_dir: Path, arch: int, arch_name: str) ->
         if module.name not in compiled_modules:
             wp.compile_aot_module(
                 module,
-                device=wp.get_device("cuda:0"),
+                arch=arch,
                 module_dir=str(build_dir),
                 strip_hash=True,
                 use_ptx=False,
@@ -309,7 +312,7 @@ def export_pose_refiner_warp_kernel(
     build_dir.mkdir(parents=True)
     wp.compile_aot_module(
         kernel.module,
-        device=wp.get_device("cuda:0"),
+        arch=arch,
         module_dir=str(build_dir),
         strip_hash=True,
         use_ptx=False,
@@ -500,11 +503,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--arch",
+        help="target GPU architecture, e.g. sm_75; defaults to the active export device",
+    )
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
     config = load_config(args.config)
-    arch, arch_name = cuda_arch()
+    arch, arch_name = cuda_arch(args.arch)
     cfg, integrator = make_integrator(config)
     warp_manifest = export_warp_kernels(integrator, args.out, arch, arch_name)
     print("Exporting mapper pose-refinement kernels", flush=True)
