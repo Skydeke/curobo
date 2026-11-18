@@ -74,6 +74,7 @@ struct IkKernelManifest {
   int shared_memory{0};
   int block_dim{0};
   int max_obstacles{0};
+  std::vector<std::string> cost_terms;
 };
 
 struct RolloutKernelProfile {
@@ -259,6 +260,7 @@ struct TrajectoryOptimizationManifest {
   IkKernelManifest bspline_backward;
   IkKernelManifest bspline_backward_effort;
   IkKernelManifest reduce_rollout_cost;
+  IkKernelManifest reduce_rollout_cost_no_pose;
   IkKernelManifest time_scaled_dt;
   IkKernelManifest cspace;
   IkKernelManifest pose;

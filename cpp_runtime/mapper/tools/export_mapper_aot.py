@@ -530,7 +530,7 @@ def main() -> None:
     pba_manifest = compile_pba(args.out, arch_name)
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "arch": arch_name,
         "warp_version": wp.__version__,
         "curobo_source_dir": str(DEFAULT_CUROBO_SOURCE_DIR.resolve()),
