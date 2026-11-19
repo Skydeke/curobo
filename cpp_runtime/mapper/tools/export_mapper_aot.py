@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -246,25 +247,39 @@ def export_warp_kernels(integrator, out_dir: Path, arch: int, arch_name: str) ->
 
     kernels = integrator.tsdf.kernels
     manifest: dict[str, Any] = {}
-    compiled_modules: set[str] = set()
     kernel_names = list(BASE_KERNEL_NAMES)
     if integrator.tsdf.data.has_features:
         kernel_names.append(FEATURE_KERNEL_NAMES[uses_tiled_feature_kernel(integrator)])
         kernel_names.extend(FEATURE_OUTPUT_KERNEL_NAMES)
         kernel_names.extend(SEMANTIC_KERNEL_NAMES)
+
+    modules = {}
+    for name in kernel_names:
+        module = getattr(kernels, name).module
+        modules[module.name] = module
+
+    jobs = max(1, int(os.environ.get("CUROBO_EXPORT_JOBS", os.cpu_count() or 1)))
+
+    def compile_module(module: Any) -> None:
+        wp.compile_aot_module(
+            module,
+            arch=arch,
+            module_dir=str(build_dir),
+            strip_hash=True,
+            use_ptx=False,
+        )
+
+    print(
+        f"Compiling {len(modules)} mapper modules with {min(jobs, len(modules))} workers",
+        flush=True,
+    )
+    with ThreadPoolExecutor(max_workers=min(jobs, len(modules))) as pool:
+        list(pool.map(compile_module, modules.values()))
+
     for index, name in enumerate(kernel_names, start=1):
         print(f"Exporting mapper kernel {index}/{len(kernel_names)}: {name}", flush=True)
         kernel = getattr(kernels, name)
         module = kernel.module
-        if module.name not in compiled_modules:
-            wp.compile_aot_module(
-                module,
-                arch=arch,
-                module_dir=str(build_dir),
-                strip_hash=True,
-                use_ptx=False,
-            )
-            compiled_modules.add(module.name)
 
         source_cubin = build_dir / f"wp_{module.name}.{arch_name.replace('_', '')}.cubin"
         source_cu = build_dir / f"wp_{module.name}.cu"
